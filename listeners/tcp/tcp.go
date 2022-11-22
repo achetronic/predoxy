@@ -4,17 +4,23 @@ package tcp
 // Ref: https://gist.github.com/jbardin/821d08cb64c01c84b81a
 
 import (
-	"bufio"
 	"bytes"
+	"fmt"
 	"github.com/achetronic/redis-proxy/api"
+	"github.com/tidwall/resp"
 	"io"
 	"log"
 	"net"
-	"os"
 )
 
 const (
 	ProtocolTcp = "tcp"
+
+	// Definitions of common used commands
+	CommandCommandDocs = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nDOCS\r\n"
+	CommandMulti       = "*1\r\n$5\r\nMULTI\r\n"
+	CommandSelect      = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
+	CommandExec        = "*1\r\n$4\r\nEXEC\r\n"
 )
 
 // createBackendConnection create a connection to the given backend on ConnectionPoolTCP,
@@ -46,55 +52,142 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 //	delete((*p.Cache)[backend.Id].ConnectionPoolTCP, connectionId)
 //}
 
-// forwardPackets forwards TCP packets from a source stream to destination steam
+// forwardDecodedPackets forwards TCP packets from a source stream to destination steam, offloading transaction
 // This function will be executed as a goroutine
-func (p *TCPProxy) forwardPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+func (p *TCPProxy) forwardDecodedPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
 
-	_, err := io.Copy(destConn, sourceConn)
+	// Small temporary buffer
+	tmp := make([]byte, 256)
 
-	if err != nil {
-		log.Printf("Copy error: %s", err)
+	// Big exchange buffer
+	buffer := make([]byte, 0, 4096)
+
+	chunk := make([]byte, 0, 4096)
+
+	for {
+		// Read each message from the source
+		n, err := sourceConn.Read(tmp)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Println("read error:", err)
+			}
+			break
+		}
+
+		//
+		chunk = append(buffer, tmp[:n]...)
+		log.Printf("Response chunk: %q", string(chunk[0:n]))
+
+		var responseBytes []byte
+
+		// Parse the chunk to transform transaction into a single command request
+		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
+		respReader := resp.NewReader(bytes.NewBufferString(string(chunk[0:n])))
+		for {
+			v, _, err := respReader.ReadValue()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				(*p.Logger).Write([]byte(err.Error()))
+			}
+
+			// MULTI command always answers with arrays
+			if v.Type() == resp.Array {
+
+				responseBytes, _ = v.MarshalRESP()
+
+				// Arrays of 0 are unexpected errors
+				if len(v.Array()) == 0 {
+					parsedResponse := v.Error().Error()
+					responseBytes = []byte(parsedResponse)
+				}
+
+				// Arrays of 1 item are just strings
+				if len(v.Array()) == 1 {
+					parsedResponse := v.Array()[0]
+					responseBytes, _ = parsedResponse.MarshalRESP()
+				}
+			}
+		}
+
+		//log.Printf(string(responseBytes))
+
+		_, err = destConn.Write(responseBytes)
+		if err != nil {
+			(*p.Logger).Write([]byte(err.Error()))
+		}
 	}
+
+	// Send the right response to the user
 	if err := sourceConn.Close(); err != nil {
 		log.Printf("Close error: %s", err)
 	}
 	sourceConnClosed <- struct{}{}
+
+	log.Println("Salimos en el forwardPackets")
 }
 
-// forwardEncodedPackets forwards TCP packets from a source stream to destination steam, modifying them on the fly
+// forwardEncodedPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
 // This function will be executed as a goroutine
 func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
 
-	buf := new(bytes.Buffer)
+	// Small temporary buffer
+	tmp := make([]byte, 256)
 
-	// Now create a reader which will read from the buffer, and use it to read
-	// the streamed array.
-	br := bufio.NewReader(buf)
+	// Big exchange buffer
+	buffer := make([]byte, 0, 4096)
 
-	// 1. Analyze packets looking for select clause
-	// 2. If select found, add registry to cache
-	// 3. If select not found try to get it from memory (or set)
-	// 4. Modify the content to craft a transaction
-	// 5. Send the transaction
-	log.Println("Entramos en el forwardEncodedPackets")
+	chunk := make([]byte, 0, 4096)
 
-	// Create a multi reader
-	mr := io.MultiReader(sourceConn)
+	for {
+		// Store into a buffer each read byte from connection until finish
+		n, err := sourceConn.Read(tmp)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Println("read error:", err)
+			}
+			break
+		}
 
-	// Create a multi writer
-	mw := io.MultiWriter(destConn, os.Stdout, br)
+		// Join all read bytes into a bigger buffer
+		chunk = append(buffer, tmp[:n]...)
 
-	_, err := io.Copy(mw, mr)
-	if err != nil {
-		log.Printf("Copy error: %s", err)
+		// Construct a transaction message
+		message := [][]byte{
+			[]byte(CommandMulti),
+			[]byte(fmt.Sprintf(CommandSelect, 0)),
+			[]byte(CommandExec),
+		}
+
+		// Ignore COMMAND DOCS command, too heavy response
+		// TODO: ALLOW LARGE RESPONSES TO REMOVE THIS CONDITION
+		if string(chunk) != CommandCommandDocs {
+			message = [][]byte{
+				[]byte(CommandMulti),
+				[]byte(fmt.Sprintf(CommandSelect, 0)),
+				chunk[0:n],
+				[]byte(CommandExec),
+			}
+		}
+
+		// Convert the message into a huge slice of bytes to be sent
+		modifiedChunk := bytes.Join(message, []byte{})
+
+		log.Printf("Received Chunk: %q", string(chunk))
+		log.Printf("Modified Chunk: %q", string(modifiedChunk))
+
+		// Forward the command to the backend
+		_, err = destConn.Write(modifiedChunk)
+		if err != nil {
+			log.Println(err)
+		}
 	}
 
 	if err := sourceConn.Close(); err != nil {
 		log.Printf("Close error: %s", err)
 	}
 	sourceConnClosed <- struct{}{}
-
-	log.Println("Salimos en el forwardEncodedPackets")
 }
 
 // handleRequest handle incoming requests, from given frontend to given backend server
@@ -131,7 +224,7 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 	go p.forwardEncodedPackets(frontendConn, backendConn, frontendClosed)
 
 	// Send the response back to frontend contacting us.
-	go p.forwardPackets(backendConn, frontendConn, backendClosed)
+	go p.forwardDecodedPackets(backendConn, frontendConn, backendClosed)
 
 	// wait for one half of the proxy to exit, then trigger a shutdown of the
 	// other half by calling CloseRead(). This will break the read loop in the

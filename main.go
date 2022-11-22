@@ -5,9 +5,11 @@ import (
 	"github.com/achetronic/redis-proxy/api"
 	"github.com/achetronic/redis-proxy/listeners/tcp"
 	"gopkg.in/yaml.v3"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
 	"time"
 )
 
@@ -50,10 +52,12 @@ func main() {
 
 	// Create the cache for proxy
 	pCache := api.ProxyCache{}
+	logger := io.Writer(os.Stdout)
 
 	mainProxy := tcp.TCPProxy{
 		Config: &config.Spec,
 		Cache:  &pCache,
+		Logger: &logger,
 	}
 
 	log.Print(*mainProxy.Config)
