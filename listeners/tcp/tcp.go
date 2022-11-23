@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 )
 
 const (
@@ -21,6 +22,18 @@ const (
 	CommandMulti       = "*1\r\n$5\r\nMULTI\r\n"
 	CommandSelect      = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
 	CommandExec        = "*1\r\n$4\r\nEXEC\r\n"
+	CommandFake        = "*1\r\n$4\r\nFAKE\r\n"
+)
+
+var (
+
+	// MessageTransaction represents a wrapper for the actual message
+	MessageTransaction = [][]byte{
+		[]byte(CommandMulti),
+		[]byte(fmt.Sprintf(CommandSelect, 0)),
+		{},
+		[]byte(CommandExec),
+	}
 )
 
 // createBackendConnection create a connection to the given backend on ConnectionPoolTCP,
@@ -152,26 +165,33 @@ func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn,
 
 		// Join all read bytes into a bigger buffer
 		chunk = append(buffer, tmp[:n]...)
+		chunk = chunk[0:n]
 
-		// Construct a transaction message
-		message := [][]byte{
-			[]byte(CommandMulti),
-			[]byte(fmt.Sprintf(CommandSelect, 0)),
-			[]byte(CommandExec),
-		}
+		// Construct a transaction message from the wrapper
+		message := MessageTransaction
 
 		// Ignore COMMAND DOCS command, too heavy response
 		// TODO: ALLOW LARGE RESPONSES TO REMOVE THIS CONDITION
-		if string(chunk) != CommandCommandDocs {
-			message = [][]byte{
-				[]byte(CommandMulti),
-				[]byte(fmt.Sprintf(CommandSelect, 0)),
-				chunk[0:n],
-				[]byte(CommandExec),
-			}
+		if !strings.Contains(strings.ToLower(string(chunk)), strings.ToLower(CommandCommandDocs)) {
+			//message[2] = []byte(strings.ReplaceAll(string(chunk), CommandCommandDocs, ""))
+			message[2] = chunk
 		}
 
-		// Convert the message into a huge slice of bytes to be sent
+		// Check if the chunk is already a transaction
+		// TODO: Process MULTI commands
+		if strings.Contains(strings.ToLower(string(chunk)), strings.ToLower(CommandMulti)) {
+			message[2] = []byte{}
+		}
+
+		log.Printf("el mensaje supuestamente filtrado %q", message)
+
+		// Check if the chunk is a pipeline
+		//"AUTH default password\\r\\nPING\\r\\nPING\\r\\nSET key value\\r\\nGET key\\r\\nINCR newkey\\r\\nINCR newkey"
+		// TODO: Process pipelined commands
+		//chunk = []byte(strings.ReplaceAll(string(chunk), "\\r", "\r"))
+		//chunk = []byte(strings.ReplaceAll(string(chunk), "\\n", "\n"))
+
+		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(message, []byte{})
 
 		log.Printf("Received Chunk: %q", string(chunk))
