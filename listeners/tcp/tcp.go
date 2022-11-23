@@ -82,6 +82,61 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 //	delete((*p.Cache)[backend.Id].ConnectionPoolTCP, connectionId)
 //}
 
+// parseRespResponse parse the response buffer to transform transaction into a single command request
+// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
+func (p *TCPProxy) parseRespResponse(byteString []byte) (responseBytes []byte, err error) {
+
+	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
+	for {
+		v, _, err := respReader.ReadValue()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return responseBytes, err
+		}
+
+		log.Printf("Mostramos toda la respuesta parseada: %q", v)
+
+		// Forward RESP errors
+		if v.Type() == resp.Error {
+			log.Printf("Hubo un error en la respuesta %q", v.Error().Error())
+			parsedResponse := resp.ErrorValue(v.Error())
+			responseBytes, _ = parsedResponse.MarshalRESP()
+			break
+		}
+
+		// Parse arrays: MULTI command always answers with arrays
+		if v.Type() == resp.Array {
+
+			// Arrays of 1 item must be treated just as strings
+			if len(v.Array()) == 1 {
+				parsedResponse := v.Array()[0]
+				responseBytes, _ = parsedResponse.MarshalRESP()
+			}
+
+			// The most common case for single commands
+			if len(v.Array()) == 2 {
+				parsedResponse := v.Array()[1]
+				responseBytes, _ = parsedResponse.MarshalRESP()
+			}
+
+			// Pipelining detected, processing all the responses
+			if len(v.Array()) > 2 {
+				for index, item := range v.Array() {
+					if index == 0 {
+						continue
+					}
+					itemBytes, _ := item.MarshalRESP()
+					responseBytes = append(responseBytes, itemBytes...)
+				}
+			}
+		}
+	}
+
+	return responseBytes, err
+}
+
 // forwardDecodedPackets forwards TCP packets from a source stream to destination steam, offloading transaction
 // This function will be executed as a goroutine
 func (p *TCPProxy) forwardDecodedPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
@@ -106,38 +161,9 @@ func (p *TCPProxy) forwardDecodedPackets(sourceConn net.Conn, destConn net.Conn,
 
 		// Parse the chunk to transform transaction into a single command request
 		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-		respReader := resp.NewReader(bytes.NewBufferString(string(buffer)))
-		for {
-			v, _, err := respReader.ReadValue()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				(*p.Logger).Write([]byte(fmt.Sprintf(FailedParsingResponseErrorMessage, err)))
-			}
-
-			// Forward RESP errors
-			if v.Type() == resp.Error {
-				log.Printf("Hubo un error en la respuesta %q", v.Error().Error())
-				parsedResponse := resp.ErrorValue(v.Error())
-				responseBytes, _ = parsedResponse.MarshalRESP()
-				break
-			}
-
-			// Parse arrays: MULTI command always answers with arrays
-			if v.Type() == resp.Array {
-
-				// Arrays of 1 item are just strings
-				if len(v.Array()) == 1 {
-					parsedResponse := v.Array()[0]
-					responseBytes, _ = parsedResponse.MarshalRESP()
-				}
-
-				if len(v.Array()) == 2 {
-					parsedResponse := v.Array()[1]
-					responseBytes, _ = parsedResponse.MarshalRESP()
-				}
-			}
+		responseBytes, err = p.parseRespResponse(buffer)
+		if err != nil {
+			(*p.Logger).Write([]byte(fmt.Sprintf(FailedParsingResponseErrorMessage, err)))
 		}
 
 		_, err = destConn.Write(responseBytes)
