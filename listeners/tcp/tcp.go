@@ -27,8 +27,10 @@ const (
 	CommandNotallowed = "*1\r\n$10\r\nNOTALLOWED\r\n"
 
 	// Regex patterns for complex commands
-	RegexQueryCommand = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
-	RegexQueryMulti   = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQueryCommand          = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQueryPipelinedCommand = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
+	RegexQueryMulti            = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQueryPipelinedMulti   = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
 
 	// Error messages
 	FailedWritingResponseErrorMessage = "Error writing the response: %q"
@@ -48,8 +50,12 @@ var (
 
 	// QueryFilters groups the filters which will be applied to requested queries before executing them
 	QueryFilters = []string{
-		RegexQueryMulti,   // TODO: Process MULTI commands. Do we want to support nested MULTI?
-		RegexQueryCommand, // TODO: Allow large responses to remove COMMAND related restrictions
+		// TODO: Process MULTI commands. Do we want to support nested MULTI?
+		RegexQueryMulti,
+		RegexQueryPipelinedMulti,
+		// TODO: Allow large responses to remove COMMAND related restrictions
+		RegexQueryCommand,
+		RegexQueryPipelinedCommand,
 	}
 )
 
@@ -213,12 +219,6 @@ func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn,
 				message[2] = []byte(CommandNotallowed)
 			}
 		}
-
-		// Check if the chunk is a pipeline
-		//"AUTH default password\\r\\nPING\\r\\nPING\\r\\nSET key value\\r\\nGET key\\r\\nINCR newkey\\r\\nINCR newkey"
-		// TODO: Process pipelined commands
-		//chunk = []byte(strings.ReplaceAll(string(chunk), "\\r", "\r"))
-		//chunk = []byte(strings.ReplaceAll(string(chunk), "\\n", "\n"))
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(message, []byte{})
