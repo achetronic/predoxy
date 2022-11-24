@@ -5,6 +5,7 @@ package tcp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"github.com/achetronic/redis-proxy/api"
 	"github.com/tidwall/resp"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -19,6 +21,7 @@ const (
 	ProtocolTcp                  = "tcp"
 	ConnectionResponseBufferSize = 8 * 1024 // 8MB
 	ConnectionTimeoutSeconds     = 10 * 60  // 10 minutes
+	DefaultDbIndex               = 0
 
 	// Definitions of common individual commands
 	CommandMulti      = "*1\r\n$5\r\nMULTI\r\n"
@@ -32,15 +35,18 @@ const (
 	// Regex patterns for individual query commands
 	RegexQueryCommand = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
 	RegexQueryMulti   = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQuerySelect  = `(\*[1-9]+(\r?\n)+\$6(\r?\n)+(SELECT|select)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<database>[0-9]+)(\r?\n)+){1}`
 
 	// Regex patterns for pipelined query commands
 	RegexQueryPipelinedCommand = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
 	RegexQueryPipelinedMulti   = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
+	RegexQueryPipelinedSelect  = `(SELECT|select){1}((\s?)+(?P<database>[0-9]+)(\r?\n)){1}`
 
 	// Error messages
 	FailedWritingResponseErrorMessage = "Error writing the response: %q"
 	FailedParsingResponseErrorMessage = "Error parsing the response: %q"
 	FailedReadingResponseErrorMessage = "Error reading the response: %q"
+	SelectDbNotFoundMessage           = "select db clause not found on the query"
 )
 
 var (
@@ -94,13 +100,8 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 	return backendConn, err
 }
 
-// deleteBackendConnection delete a connection from the ConnectionPoolTCP
-//func (p *TCPProxy) deleteBackendConnection(backend *api.Backend, connectionId uint64) {
-//	delete((*p.Cache)[backend.Id].ConnectionPoolTCP, connectionId)
-//}
-
-// filterIncomingCommands update the transaction message by filtering commands from inside the chunk
-func (p *TCPProxy) filterIncomingCommands(chunk *[]byte, transactionMessage *[][]byte) {
+// filterCommands update the transaction message by filtering commands from inside the chunk
+func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
 
 	// Filter individual queries by comparing them against patterns
 	for _, filter := range QueryFilters {
@@ -122,9 +123,9 @@ func (p *TCPProxy) filterIncomingCommands(chunk *[]byte, transactionMessage *[][
 	}
 }
 
-// filterOutgoingResponse parse the response buffer to transform transaction into a single command request
+// filterResponse parse the response buffer to transform transaction into a single command request
 // Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-func (p *TCPProxy) filterOutgoingResponse(byteString []byte) (responseBytes []byte, err error) {
+func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err error) {
 
 	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
 	for {
@@ -174,6 +175,74 @@ func (p *TCPProxy) filterOutgoingResponse(byteString []byte) (responseBytes []by
 	return responseBytes, err
 }
 
+// getCachedDB returns the index of db for selected connection when already cached
+func (p *TCPProxy) getCachedDB(sourceConn *net.Conn) (db int, err error) {
+
+	// Assume default db index
+	db = DefaultDbIndex
+
+	fromKey, _ := generateConnectionPoolKey(sourceConn)
+	(*p.Cache).CacheLock.Lock()
+	connCache, hit := (*p.Cache).ConnectionPool[*fromKey]
+	(*p.Cache).CacheLock.Unlock()
+	if !hit {
+		err = errors.New("database not cached for this source connection")
+		return db, err
+	}
+
+	db = connCache.RedisSelectedDB
+	return db, err
+}
+
+// setCachedDB TODO
+func (p *TCPProxy) setCachedDB(sourceConn *net.Conn, chunk *[]byte) (database int, err error) {
+
+	database = DefaultDbIndex
+
+	// Group all patterns to look for SELECT clause
+	selectPatterns := []string{
+		RegexQuerySelect,          // SELECT clause into individual queries
+		RegexQueryPipelinedSelect, // SELECT clause into pipelined queries
+	}
+
+	// Enabling flag to store into cache only when needed
+	selectFound := false
+
+	fromKey, _ := generateConnectionPoolKey(sourceConn)
+
+	// Find SELECT clause into the chunk by comparing against several regex patterns
+	for _, selectPattern := range selectPatterns {
+		compiledSelect := regexp.MustCompile(selectPattern)
+		matchSelect := compiledSelect.Match(*chunk)
+		if matchSelect {
+			//
+			selectFound = true
+
+			namedGroups := getRegexNamedGroups(compiledSelect, *chunk)
+
+			// Casting database index in bytes into int
+			// TODO: This seems a bit tricky, but iteration over conversion from byteArray to int is needed
+			database, err = strconv.Atoi(string(namedGroups[len(namedGroups)-1]["database"]))
+			if err != nil {
+				return database, err
+			}
+		}
+	}
+
+	if !selectFound {
+		return -1, err
+	}
+
+	// Store it into cache
+	(*p.Cache).CacheLock.Lock()
+	(*p.Cache).ConnectionPool[*fromKey] = api.ConnectionTrackStorage{
+		RedisSelectedDB: database,
+	}
+	(*p.Cache).CacheLock.Unlock()
+
+	return database, err
+}
+
 // forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
 // This function will be executed as a goroutine
 func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
@@ -198,9 +267,15 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		transactionMessage := MessageTransaction
 		transactionMessage[2] = buffer
 
+		// Parse the request to lazy update cached db index
+		// TODO: Improve the performance of this logic
+		p.setCachedDB(&sourceConn, &buffer)
+		dbIndex, _ := p.getCachedDB(&sourceConn)
+		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
+
 		// Modify the request according to the filters
 		//log.Printf("Received Chunk: %q", string(buffer))
-		p.filterIncomingCommands(&buffer, &transactionMessage)
+		p.filterCommands(&buffer, &transactionMessage)
 		//log.Printf("Modified Chunk: %q", string(modifiedChunk))
 
 		// Convert the message representation into a bytes before sending
@@ -246,7 +321,7 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 
 		// Parse the chunk to transform transaction into a single command request
 		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-		responseBytes, err = p.filterOutgoingResponse(buffer)
+		responseBytes, err = p.filterResponse(buffer)
 		if err != nil {
 			log.Print(fmt.Sprintf(FailedParsingResponseErrorMessage, err))
 		}
@@ -283,16 +358,6 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 	defer func() {
 		backendConn.Close()
 	}()
-
-	//log.Print(frontendConn.RemoteAddr().String())
-	//log.Print(generateConnectionPoolKey(frontendConn))
-	//
-	//// Create a connection track key for the new connection
-	//fromKey := generateConnectionPoolKey(from)
-	//(*p.Cache)[nextBackend.Id].CacheLock.Lock()
-	//
-	//// Look for the connection in the ConnectionPoolUDP table for selected backend
-	//backendConn, hit := (*p.Cache).ConnectionPool[*fromKey]
 
 	frontendClosed := make(chan struct{}, 1) // cliConn
 	backendClosed := make(chan struct{}, 1)  // srvConn
@@ -341,6 +406,9 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 
 // Launch start a listener loop to forward traffic to backend servers
 func (p *TCPProxy) Launch() (err error) {
+
+	// Init the cache for this proxy
+	(*p.Cache).ConnectionPool = make(api.ConnectionPoolMap)
 
 	// Resolve frontend IP address from config
 	frontendHost, err := getTCPAddress(p.Config.Listener.Host, p.Config.Listener.Port)

@@ -13,7 +13,7 @@ type ConnectionTrackKey struct {
 }
 
 type ConnectionTrackStorage struct {
-	redisSelectedDB string
+	RedisSelectedDB int
 }
 
 // ConnectionPoolMap is a type to store connection track keys for UDP connections
@@ -26,6 +26,6 @@ type ProxyCache struct {
 	// to avoid too much overrides at the same time
 	CacheLock sync.Mutex
 
-	// ConnectionPool is a pool with all active UDP connections for the backend
+	// ConnectionPool is a table storing some useful data related to the source of connection
 	ConnectionPool ConnectionPoolMap
 }
