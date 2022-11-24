@@ -24,29 +24,30 @@ const (
 	DefaultDbIndex               = 0
 
 	// Definitions of common individual commands
-	CommandMulti      = "*1\r\n$5\r\nMULTI\r\n"
-	CommandSelect     = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
-	CommandExec       = "*1\r\n$4\r\nEXEC\r\n"
-	CommandNotallowed = "*1\r\n$10\r\nNOTALLOWED\r\n"
+	CommandMulti     = "*1\r\n$5\r\nMULTI\r\n"
+	CommandSelect    = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
+	CommandExec      = "*1\r\n$4\r\nEXEC\r\n"
+	CommandEchoError = "*2\r\n$4\r\nECHO\r\n$8\r\nPERR#%d\r\n"
 
 	// Definitions of common pipelined commands
-	PipelinedCommandNotallowed = "NOTALLOWED\r\n"
+	PipelinedCommandEchoError = "ECHO PERR#%d\r\n"
 
 	// Regex patterns for individual query commands
-	RegexQueryCommand = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
-	RegexQueryMulti   = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
-	RegexQuerySelect  = `(\*[1-9]+(\r?\n)+\$6(\r?\n)+(SELECT|select)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<database>[0-9]+)(\r?\n)+){1}`
+	RegexQueryCommand   = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQueryMulti     = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQuerySelect    = `(\*[1-9]+(\r?\n)+\$6(\r?\n)+(SELECT|select)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<database>[0-9]+)(\r?\n)+){1}`
+	RegexQueryEchoError = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(ECHO|echo)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<errorcode>[0-9]+)(\r?\n)+){1}`
 
 	// Regex patterns for pipelined query commands
-	RegexQueryPipelinedCommand = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
-	RegexQueryPipelinedMulti   = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
-	RegexQueryPipelinedSelect  = `(SELECT|select){1}((\s?)+(?P<database>[0-9]+)(\r?\n)){1}`
+	RegexQueryPipelinedCommand   = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
+	RegexQueryPipelinedMulti     = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
+	RegexQueryPipelinedSelect    = `(SELECT|select){1}((\s?)+(?P<database>[0-9]+)(\r?\n)){1}`
+	RegexQueryPipelinedEchoError = `(ECHO|echo){1}((\s?)+(?P<errorcode>[0-9]+)(\r?\n)){1}`
 
 	// Error messages
 	FailedWritingResponseErrorMessage = "Error writing the response: %q"
 	FailedParsingResponseErrorMessage = "Error parsing the response: %q"
 	FailedReadingResponseErrorMessage = "Error reading the response: %q"
-	SelectDbNotFoundMessage           = "select db clause not found on the query"
 )
 
 var (
@@ -74,6 +75,13 @@ var (
 		// TODO: Allow large responses to remove COMMAND related restrictions
 		RegexQueryPipelinedCommand,
 	}
+
+	// ProxyErrorCodes represents response error codes and its messages
+	// As a convention, we use HTTP error codes for ease
+	// Ref: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status#client_error_responses
+	ProxyErrorCodes = map[int]string{
+		403: "forbidden: command is disabled on the proxy",
+	}
 )
 
 // createBackendConnection create a connection to the given backend on ConnectionPoolTCP,
@@ -98,81 +106,6 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 	}*/
 
 	return backendConn, err
-}
-
-// filterCommands update the transaction message by filtering commands from inside the chunk
-func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
-
-	// Filter individual queries by comparing them against patterns
-	for _, filter := range QueryFilters {
-		matchCommandDocs, _ := regexp.Match(filter, *chunk)
-		if matchCommandDocs {
-			(*transactionMessage)[2] = []byte(CommandNotallowed)
-		}
-	}
-
-	// Filter pipelined queries by comparing them against patterns
-	for _, filter := range PipelinedQueryFilters {
-		compiledFilter := regexp.MustCompile(filter)
-		matchCommandDocs := compiledFilter.MatchString(string(*chunk))
-		if matchCommandDocs {
-			(*transactionMessage)[2] = compiledFilter.ReplaceAll(
-				(*transactionMessage)[2],
-				[]byte("ECHO "+PipelinedCommandNotallowed))
-		}
-	}
-}
-
-// filterResponse parse the response buffer to transform transaction into a single command request
-// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err error) {
-
-	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
-	for {
-		v, _, err := respReader.ReadValue()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return responseBytes, err
-		}
-
-		// Forward RESP errors
-		if v.Type() == resp.Error {
-			parsedResponse := resp.ErrorValue(v.Error())
-			responseBytes, _ = parsedResponse.MarshalRESP()
-			break
-		}
-
-		// Parse arrays: MULTI command always answers with arrays
-		if v.Type() == resp.Array {
-
-			// Arrays of 1 item must be treated just as strings
-			if len(v.Array()) == 1 {
-				parsedResponse := v.Array()[0]
-				responseBytes, _ = parsedResponse.MarshalRESP()
-			}
-
-			// The most common case for single commands
-			if len(v.Array()) == 2 {
-				parsedResponse := v.Array()[1]
-				responseBytes, _ = parsedResponse.MarshalRESP()
-			}
-
-			// Pipelining detected, processing all the responses
-			if len(v.Array()) > 2 {
-				for index, item := range v.Array() {
-					if index == 0 {
-						continue
-					}
-					itemBytes, _ := item.MarshalRESP()
-					responseBytes = append(responseBytes, itemBytes...)
-				}
-			}
-		}
-	}
-
-	return responseBytes, err
 }
 
 // getCachedDB returns the index of db for selected connection when already cached
@@ -243,6 +176,83 @@ func (p *TCPProxy) setCachedDB(sourceConn *net.Conn, chunk *[]byte) (database in
 	return database, err
 }
 
+// filterCommands update the transaction message by filtering commands from inside the chunk
+func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
+
+	// Filter individual queries by comparing them against patterns
+	for _, filter := range QueryFilters {
+		matchCommandDocs, _ := regexp.Match(filter, *chunk)
+		if matchCommandDocs {
+			(*transactionMessage)[2] = []byte(fmt.Sprintf(CommandEchoError, 403))
+		}
+	}
+
+	// Filter pipelined queries by comparing them against patterns
+	for _, filter := range PipelinedQueryFilters {
+		compiledFilter := regexp.MustCompile(filter)
+		matchFilter := compiledFilter.MatchString(string(*chunk))
+		if matchFilter {
+			(*transactionMessage)[2] = compiledFilter.ReplaceAll(
+				(*transactionMessage)[2],
+				[]byte(fmt.Sprintf(PipelinedCommandEchoError, 403)))
+		}
+	}
+}
+
+// filterResponse parse the response buffer to transform transaction into a single command request
+// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
+func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err error) {
+
+	log.Printf("%q\n", string(byteString))
+
+	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
+	for {
+		v, _, err := respReader.ReadValue()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return responseBytes, err
+		}
+
+		// Forward RESP errors
+		if v.Type() == resp.Error {
+			parsedResponse := resp.ErrorValue(v.Error())
+			responseBytes, _ = parsedResponse.MarshalRESP()
+			break
+		}
+
+		// Parse arrays: MULTI command always answers with arrays
+		if v.Type() == resp.Array {
+
+			// Arrays of 1 item must be treated just as strings
+			if len(v.Array()) == 1 {
+				parsedResponse := v.Array()[0]
+				responseBytes, _ = parsedResponse.MarshalRESP()
+			}
+
+			// The most common case for single commands
+			if len(v.Array()) == 2 {
+				parsedResponse := v.Array()[1]
+				responseBytes, _ = parsedResponse.MarshalRESP()
+			}
+
+			// Pipelining detected, processing all the responses
+			if len(v.Array()) > 2 {
+				for index, item := range v.Array() {
+					if index == 0 {
+						continue
+					}
+					itemBytes, _ := item.MarshalRESP()
+					responseBytes = append(responseBytes, itemBytes...)
+				}
+			}
+		}
+	}
+
+	return responseBytes, err
+}
+
 // forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
 // This function will be executed as a goroutine
 func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
@@ -274,9 +284,10 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
 
 		// Modify the request according to the filters
-		//log.Printf("Received Chunk: %q", string(buffer))
+		log.Printf("Remote: %q", sourceConn.RemoteAddr().String())
+		log.Printf("Received Chunk: %q", string(buffer))
 		p.filterCommands(&buffer, &transactionMessage)
-		//log.Printf("Modified Chunk: %q", string(modifiedChunk))
+		log.Printf("Modified Chunk: %q", string(transactionMessage[2]))
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(transactionMessage, []byte{})
