@@ -20,16 +20,21 @@ const (
 	ConnectionResponseBufferSize = 8 * 1024 // 8MB
 	ConnectionTimeoutSeconds     = 10 * 60  // 10 minutes
 
-	// Definitions of common used commands
+	// Definitions of common individual commands
 	CommandMulti      = "*1\r\n$5\r\nMULTI\r\n"
 	CommandSelect     = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
 	CommandExec       = "*1\r\n$4\r\nEXEC\r\n"
 	CommandNotallowed = "*1\r\n$10\r\nNOTALLOWED\r\n"
 
-	// Regex patterns for complex commands
-	RegexQueryCommand          = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	// Definitions of common pipelined commands
+	PipelinedCommandNotallowed = "NOTALLOWED\r\n"
+
+	// Regex patterns for individual query commands
+	RegexQueryCommand = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+	RegexQueryMulti   = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
+
+	// Regex patterns for pipelined query commands
 	RegexQueryPipelinedCommand = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
-	RegexQueryMulti            = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
 	RegexQueryPipelinedMulti   = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
 
 	// Error messages
@@ -52,9 +57,15 @@ var (
 	QueryFilters = []string{
 		// TODO: Process MULTI commands. Do we want to support nested MULTI?
 		RegexQueryMulti,
-		RegexQueryPipelinedMulti,
 		// TODO: Allow large responses to remove COMMAND related restrictions
 		RegexQueryCommand,
+	}
+
+	// PipelinedQueryFilters groups the filters which will be applied to requested queries before executing them
+	PipelinedQueryFilters = []string{
+		// TODO: Process MULTI commands. Do we want to support nested MULTI?
+		RegexQueryPipelinedMulti,
+		// TODO: Allow large responses to remove COMMAND related restrictions
 		RegexQueryPipelinedCommand,
 	}
 )
@@ -88,9 +99,32 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 //	delete((*p.Cache)[backend.Id].ConnectionPoolTCP, connectionId)
 //}
 
-// parseRespResponse parse the response buffer to transform transaction into a single command request
+// filterIncomingCommands update the transaction message by filtering commands from inside the chunk
+func (p *TCPProxy) filterIncomingCommands(chunk *[]byte, transactionMessage *[][]byte) {
+
+	// Filter individual queries by comparing them against patterns
+	for _, filter := range QueryFilters {
+		matchCommandDocs, _ := regexp.Match(filter, *chunk)
+		if matchCommandDocs {
+			(*transactionMessage)[2] = []byte(CommandNotallowed)
+		}
+	}
+
+	// Filter pipelined queries by comparing them against patterns
+	for _, filter := range PipelinedQueryFilters {
+		compiledFilter := regexp.MustCompile(filter)
+		matchCommandDocs := compiledFilter.MatchString(string(*chunk))
+		if matchCommandDocs {
+			(*transactionMessage)[2] = compiledFilter.ReplaceAll(
+				(*transactionMessage)[2],
+				[]byte("ECHO "+PipelinedCommandNotallowed))
+		}
+	}
+}
+
+// filterOutgoingResponse parse the response buffer to transform transaction into a single command request
 // Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-func (p *TCPProxy) parseRespResponse(byteString []byte) (responseBytes []byte, err error) {
+func (p *TCPProxy) filterOutgoingResponse(byteString []byte) (responseBytes []byte, err error) {
 
 	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
 	for {
@@ -102,11 +136,8 @@ func (p *TCPProxy) parseRespResponse(byteString []byte) (responseBytes []byte, e
 			return responseBytes, err
 		}
 
-		log.Printf("Mostramos toda la respuesta parseada: %q", v)
-
 		// Forward RESP errors
 		if v.Type() == resp.Error {
-			log.Printf("Hubo un error en la respuesta %q", v.Error().Error())
 			parsedResponse := resp.ErrorValue(v.Error())
 			responseBytes, _ = parsedResponse.MarshalRESP()
 			break
@@ -143,54 +174,9 @@ func (p *TCPProxy) parseRespResponse(byteString []byte) (responseBytes []byte, e
 	return responseBytes, err
 }
 
-// forwardDecodedPackets forwards TCP packets from a source stream to destination steam, offloading transaction
+// forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
 // This function will be executed as a goroutine
-func (p *TCPProxy) forwardDecodedPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
-
-	// Big exchange buffer
-	buffer := make([]byte, 0, ConnectionResponseBufferSize)
-
-	var responseBytes []byte
-
-	for {
-		// Read each message from the source
-		n, err := sourceConn.Read(buffer[:cap(buffer)])
-		if err != nil {
-			if err != io.EOF {
-				(*p.Logger).Write([]byte(fmt.Sprintf(FailedReadingResponseErrorMessage, err)))
-			}
-			break
-		}
-
-		buffer = buffer[:n]
-		log.Printf("Response chunk: %q", string(buffer))
-
-		// Parse the chunk to transform transaction into a single command request
-		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-		responseBytes, err = p.parseRespResponse(buffer)
-		if err != nil {
-			(*p.Logger).Write([]byte(fmt.Sprintf(FailedParsingResponseErrorMessage, err)))
-		}
-
-		_, err = destConn.Write(responseBytes)
-		if err != nil {
-			(*p.Logger).Write([]byte(fmt.Sprintf(FailedWritingResponseErrorMessage, err)))
-		}
-
-		// Clear last read content
-		buffer = make([]byte, 0, ConnectionResponseBufferSize)
-	}
-
-	// Send the right response to the user
-	if err := sourceConn.Close(); err != nil {
-		log.Printf("Close error: %s", err)
-	}
-	sourceConnClosed <- struct{}{}
-}
-
-// forwardEncodedPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
-// This function will be executed as a goroutine
-func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
 
 	// Big exchange buffer
 	buffer := make([]byte, 0, ConnectionResponseBufferSize)
@@ -209,22 +195,16 @@ func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn,
 		buffer = buffer[:n]
 
 		// Construct a transaction message from the wrapper
-		message := MessageTransaction
-		message[2] = buffer
+		transactionMessage := MessageTransaction
+		transactionMessage[2] = buffer
 
-		// Filter several queries by comparing them against patterns
-		for _, filter := range QueryFilters {
-			matchCommandDocs, _ := regexp.Match(filter, buffer)
-			if matchCommandDocs {
-				message[2] = []byte(CommandNotallowed)
-			}
-		}
+		// Modify the request according to the filters
+		//log.Printf("Received Chunk: %q", string(buffer))
+		p.filterIncomingCommands(&buffer, &transactionMessage)
+		//log.Printf("Modified Chunk: %q", string(modifiedChunk))
 
 		// Convert the message representation into a bytes before sending
-		modifiedChunk := bytes.Join(message, []byte{})
-
-		log.Printf("Received Chunk: %q", string(buffer))
-		log.Printf("Modified Chunk: %q", string(modifiedChunk))
+		modifiedChunk := bytes.Join(transactionMessage, []byte{})
 
 		// Forward the command to the backend
 		_, err = destConn.Write(modifiedChunk)
@@ -236,6 +216,51 @@ func (p *TCPProxy) forwardEncodedPackets(sourceConn net.Conn, destConn net.Conn,
 		buffer = make([]byte, 0, ConnectionResponseBufferSize)
 	}
 
+	if err := sourceConn.Close(); err != nil {
+		log.Printf("Close error: %s", err)
+	}
+	sourceConnClosed <- struct{}{}
+}
+
+// forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
+// This function will be executed as a goroutine
+func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+
+	// Big exchange buffer
+	buffer := make([]byte, 0, ConnectionResponseBufferSize)
+
+	var responseBytes []byte
+
+	for {
+		// Read each message from the source
+		n, err := sourceConn.Read(buffer[:cap(buffer)])
+		if err != nil {
+			if err != io.EOF {
+				log.Print(fmt.Sprintf(FailedReadingResponseErrorMessage, err))
+			}
+			break
+		}
+
+		buffer = buffer[:n]
+		//log.Printf("Response chunk: %q", string(buffer))
+
+		// Parse the chunk to transform transaction into a single command request
+		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
+		responseBytes, err = p.filterOutgoingResponse(buffer)
+		if err != nil {
+			log.Print(fmt.Sprintf(FailedParsingResponseErrorMessage, err))
+		}
+
+		_, err = destConn.Write(responseBytes)
+		if err != nil {
+			log.Print(fmt.Sprintf(FailedWritingResponseErrorMessage, err))
+		}
+
+		// Clear last read content
+		buffer = make([]byte, 0, ConnectionResponseBufferSize)
+	}
+
+	// Send the right response to the user
 	if err := sourceConn.Close(); err != nil {
 		log.Printf("Close error: %s", err)
 	}
@@ -279,10 +304,10 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 	//backendConn.SetDeadline(time.Now().Add(time.Second * ConnectionTimeoutSeconds))
 
 	// Send the request from the frontend to the backend server
-	go p.forwardEncodedPackets(frontendConn, backendConn, frontendClosed)
+	go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
 
 	// Send the response back to frontend contacting us.
-	go p.forwardDecodedPackets(backendConn, frontendConn, backendClosed)
+	go p.forwardResponsePackets(backendConn, frontendConn, backendClosed)
 
 	// wait for one half of the proxy to exit, then trigger a shutdown of the
 	// other half by calling CloseRead(). This will break the read loop in the
