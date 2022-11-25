@@ -1,0 +1,13 @@
+apiVersion: ratomelect.achetronic.com/v1beta1
+kind: Config
+metadata:
+  name: monolith-redis-proxy
+spec:
+  listener:
+    protocol: tcp
+    host: 0.0.0.0
+    port: 6381
+  backend:
+    host: localhost
+    port: 6379
+

@@ -1,23 +1,32 @@
 package main
 
 import (
-	"fmt"
-	"github.com/achetronic/redis-proxy/api"
-	"github.com/achetronic/redis-proxy/listeners/tcp"
+	"flag"
+	"github.com/achetronic/ratomelect/api"
+	"github.com/achetronic/ratomelect/listeners/tcp"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
-	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
-	"os"
 	"time"
 )
 
 const (
-	ConfigFile = "sample.yaml"
+	//
+	DefaultConfigFilePathFlag = "sample.yaml"
+	DefaultLogLevelFlag       = "info"
+
+	//
+	LogLevelFlagDescription   = "log level for the application: debug, info, error"
+	ConfigFileFlagDescription = "path to the config.yaml file"
 
 	//
 	InvalidConfigErrorMessage = "Config file is not valid: %s"
+
+	// Error messages
+	ProxyLaunchMessage = "TCP proxy will be launched listening on %s:%d"
 )
 
 // LoadYAMLConfig TODO
@@ -26,18 +35,16 @@ func LoadYAMLConfig(filePath string) (config api.Config, err error) {
 	// read YAML config file
 	yfile, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		log.Fatal(err)
+		return config, err
 	}
 
 	// Try to load config into the object
 	err = yaml.Unmarshal(yfile, &config)
 	if err != nil {
-		log.Fatal(err)
+		return config, err
 	}
 
-	fmt.Printf("--- m:\n%v\n\n", config.Metadata.Name)
-
-	return
+	return config, err
 }
 
 //
@@ -46,27 +53,51 @@ func main() {
 	// Feed the seed to be able to get random numbers safe across the code
 	rand.Seed(time.Now().UnixNano())
 
-	// Load configuration file
-	var config api.Config
-	config, err := LoadYAMLConfig(ConfigFile)
+	// Play with the flags
+	logLevelFlag := flag.String("zap-log-level", DefaultLogLevelFlag, LogLevelFlagDescription)
+	configPathFlag := flag.String("config", DefaultConfigFilePathFlag, ConfigFileFlagDescription)
+	flag.Parse()
 
-	// Create the cache for proxy
-	pCache := api.ProxyCache{}
-	logger := io.Writer(os.Stdout)
+	logLevel, _ := zap.ParseAtomicLevel(*logLevelFlag)
 
+	// Initialize the logger
+	loggerConfig := zap.NewProductionConfig()
+	loggerConfig.EncoderConfig.TimeKey = "timestamp"
+	loggerConfig.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.RFC3339)
+	loggerConfig.Level.SetLevel(logLevel.Level())
+
+	// Configure the logger
+	logger, err := loggerConfig.Build()
+	if err != nil {
+		log.Fatal(err)
+	}
+	sugar := logger.Sugar()
+
+	// Create the proxy
 	mainProxy := tcp.TCPProxy{
-		Config: &config.Spec,
-		Cache:  &pCache,
-		Logger: &logger,
+		Config: &api.Proxy{},
+		Cache:  &api.ProxyCache{}, // Create the cache for proxy
+		Logger: sugar,
 	}
 
-	log.Print(*mainProxy.Config)
-	log.Print(*mainProxy.Cache)
+	// Load configuration file
+	config := api.Config{}
+	config, err = LoadYAMLConfig(*configPathFlag)
+	if err != nil {
+		mainProxy.Logger.Fatal(err)
+	}
+
+	// Set the configuration inside the proxy
+	mainProxy.Config = &config.Spec
+
+	// TODO: REMOVE THIS DEBUGGING SHIT
+	mainProxy.Logger.Debug(*mainProxy.Config)
+	mainProxy.Logger.Debug(*mainProxy.Cache)
 
 	var waitForEverything chan struct{}
 
 	// Launch all the listeners according to their configuration
-	log.Printf("Levantamos un proxy TCP, escuchando en %s:%d", mainProxy.Config.Listener.Host, mainProxy.Config.Listener.Port)
+	mainProxy.Logger.Infof(ProxyLaunchMessage, mainProxy.Config.Listener.Host, mainProxy.Config.Listener.Port)
 	go func() {
 		err := mainProxy.Launch()
 		if err != nil {
@@ -76,5 +107,6 @@ func main() {
 
 	<-waitForEverything
 
-	log.Print(err)
+	// Log the error if the proxy explodes
+	mainProxy.Logger.Error(err)
 }

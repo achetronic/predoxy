@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/achetronic/redis-proxy/api"
+	"github.com/achetronic/ratomelect/api"
 	"github.com/tidwall/resp"
 	"io"
 	"log"
@@ -48,9 +48,24 @@ const (
 	RegexResponseEchoError = `(?m)^\$8(\r?\n)(?i)(PERR#[0-9]+)(\r?\n)`
 
 	// Error messages
-	FailedWritingResponseErrorMessage = "Error writing the response: %q"
-	FailedParsingResponseErrorMessage = "Error parsing the response: %q"
-	FailedReadingResponseErrorMessage = "Error reading the response: %q"
+	FailedWritingQueryErrorMessage            = "Error writing the query on the socket: %q"
+	FailedWritingResponseErrorMessage         = "Error writing the response on the socket: %q"
+	FailedReadingQueryErrorMessage            = "Error reading the query from the client socket: %q"
+	FailedReadingResponseErrorMessage         = "Error reading the response from the server socket: %q"
+	FailedParsingResponseErrorMessage         = "Error parsing the response: %q"
+	FailedConnectionDataParsingErrorMessage   = "Error parsing the host and port from remote: %q"
+	FailedClosingClientConnectionErrorMessage = "Error closing the connection on the client socket: %q"
+	FailedClosingServerConnectionErrorMessage = "Error closing the connection on the server socket: %q"
+
+	// Info messages
+	ClientConnectedInfoMessage = "A new connection established from remote: %s"
+
+	// Debug messages
+	CachedDatabaseDebugMessage         = "Cached database: %d"
+	ResponseBeforeFilterDebugMessage   = "Response before applying filters: %s"
+	ResponseAfterFilterDebugMessage    = "Response after applying filters: %s"
+	ClientConnectionClosedDebugMessage = "Connection was closed on the client side"
+	ServerConnectionClosedDebugMessage = "Connection was closed on the server side"
 )
 
 var (
@@ -169,8 +184,7 @@ func (p *TCPProxy) setCachedDB(sourceConn *net.Conn, chunk *[]byte) (database in
 	}
 	(*p.Cache).CacheLock.Unlock()
 
-	log.Printf("Cached database: %d", database)
-
+	p.Logger.Debugf(CachedDatabaseDebugMessage, database)
 	return database, err
 }
 
@@ -201,7 +215,7 @@ func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
 // Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
 func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err error) {
 
-	log.Printf("%q\n", string(byteString))
+	p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(byteString))
 
 	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
 	for {
@@ -272,7 +286,7 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		n, err := sourceConn.Read(buffer[:cap(buffer)])
 		if err != nil {
 			if err != io.EOF {
-				fmt.Println("read error:", err)
+				p.Logger.Errorf(FailedReadingQueryErrorMessage, err)
 			}
 			break
 		}
@@ -290,11 +304,11 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		dbIndex, _ := p.getCachedDB(&sourceConn)
 		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
 
+		p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(buffer))
+
 		// Modify the request according to the filters
-		log.Printf("Remote: %q", sourceConn.RemoteAddr().String())
-		log.Printf("Received Chunk: %q", string(buffer))
 		p.filterCommands(&buffer, &transactionMessage)
-		log.Printf("Modified Chunk: %q", string(transactionMessage[2]))
+		p.Logger.Debugf(ResponseAfterFilterDebugMessage, string(transactionMessage[2]))
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(transactionMessage, []byte{})
@@ -302,7 +316,7 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		// Forward the command to the backend
 		_, err = destConn.Write(modifiedChunk)
 		if err != nil {
-			log.Println(err)
+			p.Logger.Errorf(FailedWritingQueryErrorMessage, err)
 		}
 
 		// Clear last read content
@@ -310,11 +324,11 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 	}
 
 	if err := sourceConn.Close(); err != nil {
-		log.Printf("Close error: %s", err)
+		p.Logger.Errorf(FailedClosingClientConnectionErrorMessage, err)
 	}
 	sourceConnClosed <- struct{}{}
 
-	log.Print("La conexión la cerró el cliente")
+	p.Logger.Debug(ClientConnectionClosedDebugMessage)
 }
 
 // forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
@@ -342,12 +356,12 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
 		responseBytes, err = p.filterResponse(buffer)
 		if err != nil {
-			log.Print(fmt.Sprintf(FailedParsingResponseErrorMessage, err))
+			p.Logger.Errorf(FailedParsingResponseErrorMessage, err)
 		}
 
 		_, err = destConn.Write(responseBytes)
 		if err != nil {
-			log.Print(fmt.Sprintf(FailedWritingResponseErrorMessage, err))
+			p.Logger.Errorf(FailedWritingResponseErrorMessage, err)
 		}
 
 		// Clear last read content
@@ -356,11 +370,11 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 
 	// Send the right response to the user
 	if err := sourceConn.Close(); err != nil {
-		log.Printf("Close error: %s", err)
+		p.Logger.Errorf(FailedClosingServerConnectionErrorMessage, err)
 	}
 	sourceConnClosed <- struct{}{}
 
-	log.Print("La conexión la cerró el server")
+	p.Logger.Debug(ServerConnectionClosedDebugMessage)
 }
 
 // handleRequest handle incoming requests, from given frontend to given backend server
@@ -428,7 +442,7 @@ func (p *TCPProxy) Launch() (err error) {
 	// Resolve frontend IP address from config
 	frontendHost, err := getTCPAddress(p.Config.Listener.Host, p.Config.Listener.Port)
 	if err != nil {
-		log.Printf("error en el getTCPAddres: %s", err)
+		p.Logger.Errorf(FailedConnectionDataParsingErrorMessage, err)
 		return err
 	}
 
@@ -456,6 +470,8 @@ func (p *TCPProxy) Launch() (err error) {
 
 		// Process connections in a new goroutine to parallelize them
 		go p.handleRequest(frontendConn)
+
+		p.Logger.Infof(ClientConnectedInfoMessage, frontendConn.RemoteAddr().String())
 	}
 }
 

@@ -1,7 +1,7 @@
 package tcp
 
 import (
-	"github.com/achetronic/redis-proxy/api"
+	"github.com/achetronic/ratomelect/api"
 	"net"
 	"regexp"
 	"strconv"
