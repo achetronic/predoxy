@@ -2,8 +2,8 @@ package main
 
 import (
 	"flag"
-	"github.com/achetronic/ratomelect/api"
-	"github.com/achetronic/ratomelect/listeners/tcp"
+	"github.com/achetronic/ratomelector/api"
+	"github.com/achetronic/ratomelector/listeners/tcp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
@@ -91,8 +91,8 @@ func main() {
 	mainProxy.Config = &config.Spec
 
 	// TODO: REMOVE THIS DEBUGGING SHIT
-	mainProxy.Logger.Debug(*mainProxy.Config)
-	mainProxy.Logger.Debug(*mainProxy.Cache)
+	mainProxy.Logger.Debug(mainProxy.Config)
+	mainProxy.Logger.Debug(mainProxy.Cache.ConnectionPool)
 
 	var waitForEverything chan struct{}
 

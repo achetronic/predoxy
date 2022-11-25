@@ -7,10 +7,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/achetronic/ratomelect/api"
+	"github.com/achetronic/ratomelector/api"
 	"github.com/tidwall/resp"
 	"io"
-	"log"
 	"net"
 	"regexp"
 	"strconv"
@@ -64,6 +63,8 @@ const (
 	CachedDatabaseDebugMessage         = "Cached database: %d"
 	ResponseBeforeFilterDebugMessage   = "Response before applying filters: %s"
 	ResponseAfterFilterDebugMessage    = "Response after applying filters: %s"
+	QueryBeforeFilterDebugMessage      = "Query before applying filters: %s"
+	QueryAfterFilterDebugMessage       = "Query after applying filters: %s"
 	ClientConnectionClosedDebugMessage = "Connection was closed on the client side"
 	ServerConnectionClosedDebugMessage = "Connection was closed on the server side"
 )
@@ -215,8 +216,6 @@ func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
 // Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
 func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err error) {
 
-	p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(byteString))
-
 	respReader := resp.NewReader(bytes.NewBufferString(string(byteString)))
 	for {
 		v, _, err := respReader.ReadValue()
@@ -269,8 +268,6 @@ func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err 
 		responseBytes = compiledFilter.ReplaceAllLiteral(responseBytes, []byte(ProxyErrorCodes[403]+"\r\n"))
 	}
 
-	log.Printf("Response: %q\n", string(responseBytes))
-
 	return responseBytes, err
 }
 
@@ -304,11 +301,11 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		dbIndex, _ := p.getCachedDB(&sourceConn)
 		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
 
-		p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(buffer))
+		p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(buffer))
 
 		// Modify the request according to the filters
 		p.filterCommands(&buffer, &transactionMessage)
-		p.Logger.Debugf(ResponseAfterFilterDebugMessage, string(transactionMessage[2]))
+		p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(transactionMessage, []byte{})
@@ -345,12 +342,14 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 		n, err := sourceConn.Read(buffer[:cap(buffer)])
 		if err != nil {
 			if err != io.EOF {
-				log.Print(fmt.Sprintf(FailedReadingResponseErrorMessage, err))
+				p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
 			}
 			break
 		}
 
 		buffer = buffer[:n]
+
+		p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(buffer))
 
 		// Parse the chunk to transform transaction into a single command request
 		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
@@ -358,6 +357,7 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 		if err != nil {
 			p.Logger.Errorf(FailedParsingResponseErrorMessage, err)
 		}
+		p.Logger.Debugf(ResponseAfterFilterDebugMessage, string(responseBytes))
 
 		_, err = destConn.Write(responseBytes)
 		if err != nil {

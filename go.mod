@@ -1,4 +1,4 @@
-module github.com/achetronic/ratomelect
+module github.com/achetronic/ratomelector
 
 go 1.18
 

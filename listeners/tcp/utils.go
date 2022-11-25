@@ -1,7 +1,7 @@
 package tcp
 
 import (
-	"github.com/achetronic/ratomelect/api"
+	"github.com/achetronic/ratomelector/api"
 	"net"
 	"regexp"
 	"strconv"
