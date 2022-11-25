@@ -33,8 +33,9 @@ const (
 	PipelinedCommandEchoError = "ECHO PERR#%d\r\n"
 
 	// Regex patterns for individual intercepted commands
+	// Ref: https://pkg.go.dev/regexp/syntax
 	RegexQueryCommand = `(\*[1-9]+(\r?\n)\$7(\r?\n)(?i)(command)(\r?\n)){1}(\$[1-9]+(\r?\n)[A-Za-z]+(\r?\n))*`
-	RegexQueryMulti   = `(\*[1-9]+(\r?\n)\$5(\r?\n)(?i)(multi)(\r?\n)){1}`
+	RegexQueryMulti   = `(\*[1-9]+(\r?\n)\$5(\r?\n)(?i)(multi)(\r?\n)){1}(\$[1-9]+(\r?\n)[A-Za-z]+(\r?\n))*`
 	RegexQuerySelect  = `(\*[1-9]+(\r?\n)\$6(\r?\n)(?i)(select)(\r?\n)){1}(\$[1-9]+(\r?\n)(?P<database>[0-9]+)(\r?\n)){1}`
 
 	// Regex patterns for intercepted pipelined commands
@@ -42,9 +43,9 @@ const (
 	RegexQueryPipelinedMulti   = `(?m)^(?i)(multi){1}([[:blank:]]*[A-Za-z]+)*`
 	RegexQueryPipelinedSelect  = `(?m)^(?i)(select){1}([[:blank:]]*(?P<database>[0-9]+)){1}`
 
-	// Regex patterns for intercepted responses
-	RegexResponseEchoError          = `(\*[1-9]+(\r?\n)\$4(\r?\n)(?i)(echo)(\r?\n)){1}(\$[1-9]+(\r?\n)(?P<errorcode>[0-9]+)(\r?\n)){1}`
-	RegexResponsePipelinedEchoError = `(?m)^(?i)(echo){1}([[:blank:]]*(?P<errorcode>[0-9]+)){1}`
+	// RegexResponseEchoError is a regex pattern for intercepted responses
+	// Example raw slice: $8\r\nPERR#403\r\n
+	RegexResponseEchoError = `(?m)^\$8(\r?\n)(?i)(PERR#[0-9]+)(\r?\n)`
 
 	// Error messages
 	FailedWritingResponseErrorMessage = "Error writing the response: %q"
@@ -78,8 +79,9 @@ var (
 	// ProxyErrorCodes represents response error codes and its messages
 	// As a convention, we use HTTP error codes for ease
 	// Ref: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status#client_error_responses
+	// TODO craft a function to wrap the error messages automatically
 	ProxyErrorCodes = map[int]string{
-		403: "forbidden: command is disabled on the proxy",
+		403: "-ERR forbidden: command disabled on proxy",
 	}
 )
 
@@ -251,6 +253,15 @@ func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err 
 		}
 	}
 
+	// Offload errors on the response chunk
+	compiledFilter := regexp.MustCompile(RegexResponseEchoError)
+	matchFilter := compiledFilter.Match(responseBytes)
+	if matchFilter {
+		responseBytes = compiledFilter.ReplaceAllLiteral(responseBytes, []byte(ProxyErrorCodes[403]+"\r\n"))
+	}
+
+	log.Printf("Response: %q\n", string(responseBytes))
+
 	return responseBytes, err
 }
 
@@ -289,7 +300,6 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		log.Printf("Received Chunk: %q", string(buffer))
 		p.filterCommands(&buffer, &transactionMessage)
 		log.Printf("Modified Chunk: %q", string(transactionMessage[2]))
-		log.Print("\n\n\n\n")
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(transactionMessage, []byte{})
@@ -308,6 +318,8 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		log.Printf("Close error: %s", err)
 	}
 	sourceConnClosed <- struct{}{}
+
+	log.Print("La conexión la cerró el cliente")
 }
 
 // forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
@@ -330,7 +342,6 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 		}
 
 		buffer = buffer[:n]
-		//log.Printf("Response chunk: %q", string(buffer))
 
 		// Parse the chunk to transform transaction into a single command request
 		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
@@ -353,6 +364,8 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 		log.Printf("Close error: %s", err)
 	}
 	sourceConnClosed <- struct{}{}
+
+	log.Print("La conexión la cerró el server")
 }
 
 // handleRequest handle incoming requests, from given frontend to given backend server
@@ -374,12 +387,6 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 
 	frontendClosed := make(chan struct{}, 1) // cliConn
 	backendClosed := make(chan struct{}, 1)  // srvConn
-
-	// Set the timeouts for the connections
-	// TODO: decide the deadline policy
-	frontendConn.SetDeadline(time.Time{})
-	backendConn.SetDeadline(time.Time{})
-	//backendConn.SetDeadline(time.Now().Add(time.Second * ConnectionTimeoutSeconds))
 
 	// Send the request from the frontend to the backend server
 	go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
@@ -435,6 +442,10 @@ func (p *TCPProxy) Launch() (err error) {
 	if err != nil {
 		return err
 	}
+
+	// Set the timeouts for the connections
+	// TODO: decide the deadline policy
+	frontendServer.SetDeadline(time.Now().Add(10 * time.Minute))
 
 	// Close the listener when the application closes
 	defer frontendServer.Close()
