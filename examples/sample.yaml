@@ -1,4 +1,4 @@
-apiVersion: redis-proxy.achetronic.com/v1beta1
+apiVersion: ratomelect.achetronic.com/v1beta1
 kind: Config
 metadata:
   name: monolith-redis-proxy

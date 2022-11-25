@@ -101,11 +101,6 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 		return backendConn, err
 	}
 
-	// Initialize the ConnectionPoolTCP of the backend when empty
-	/*if (*p.Cache).ConnectionPool == nil {
-		(*p.Cache).ConnectionPool = make(api.ConnectionPoolMap)
-	}*/
-
 	return backendConn, err
 }
 
@@ -445,7 +440,7 @@ func (p *TCPProxy) Launch() (err error) {
 
 	// Set the timeouts for the connections
 	// TODO: decide the deadline policy
-	frontendServer.SetDeadline(time.Now().Add(10 * time.Minute))
+	frontendServer.SetDeadline(time.Now().Add(ConnectionTimeoutSeconds * time.Second))
 
 	// Close the listener when the application closes
 	defer frontendServer.Close()
