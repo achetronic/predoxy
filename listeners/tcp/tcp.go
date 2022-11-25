@@ -23,26 +23,28 @@ const (
 	ConnectionTimeoutSeconds     = 10 * 60  // 10 minutes
 	DefaultDbIndex               = 0
 
-	// Definitions of common individual commands
+	// Definitions of common individual commands (used to craft commands)
 	CommandMulti     = "*1\r\n$5\r\nMULTI\r\n"
 	CommandSelect    = "*2\r\n$6\r\nSELECT\r\n$1\r\n%d\r\n"
 	CommandExec      = "*1\r\n$4\r\nEXEC\r\n"
 	CommandEchoError = "*2\r\n$4\r\nECHO\r\n$8\r\nPERR#%d\r\n"
 
-	// Definitions of common pipelined commands
+	// Definitions of common pipelined commands (used to craft commands)
 	PipelinedCommandEchoError = "ECHO PERR#%d\r\n"
 
-	// Regex patterns for individual query commands
-	RegexQueryCommand   = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(COMMAND|command)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
-	RegexQueryMulti     = `(\*[1-9]+(\r?\n)+\$5(\r?\n)+(MULTI|multi)(\r?\n)+){1}(\$[1-9]+(\r?\n)+[A-Za-z]+(\r?\n)+)*`
-	RegexQuerySelect    = `(\*[1-9]+(\r?\n)+\$6(\r?\n)+(SELECT|select)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<database>[0-9]+)(\r?\n)+){1}`
-	RegexQueryEchoError = `(\*[1-9]+(\r?\n)+\$7(\r?\n)+(ECHO|echo)(\r?\n)+){1}(\$[1-9]+(\r?\n)+(?P<errorcode>[0-9]+)(\r?\n)+){1}`
+	// Regex patterns for individual intercepted commands
+	RegexQueryCommand = `(\*[1-9]+(\r?\n)\$7(\r?\n)(?i)(command)(\r?\n)){1}(\$[1-9]+(\r?\n)[A-Za-z]+(\r?\n))*`
+	RegexQueryMulti   = `(\*[1-9]+(\r?\n)\$5(\r?\n)(?i)(multi)(\r?\n)){1}`
+	RegexQuerySelect  = `(\*[1-9]+(\r?\n)\$6(\r?\n)(?i)(select)(\r?\n)){1}(\$[1-9]+(\r?\n)(?P<database>[0-9]+)(\r?\n)){1}`
 
-	// Regex patterns for pipelined query commands
-	RegexQueryPipelinedCommand   = `(COMMAND|command){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
-	RegexQueryPipelinedMulti     = `(MULTI|multi){1}((\s?)+[A-Za-z]+)*(\r?\n)*`
-	RegexQueryPipelinedSelect    = `(SELECT|select){1}((\s?)+(?P<database>[0-9]+)(\r?\n)){1}`
-	RegexQueryPipelinedEchoError = `(ECHO|echo){1}((\s?)+(?P<errorcode>[0-9]+)(\r?\n)){1}`
+	// Regex patterns for intercepted pipelined commands
+	RegexQueryPipelinedCommand = `(?m)^(?i)(command){1}([[:blank:]]*[A-Za-z]+)*`
+	RegexQueryPipelinedMulti   = `(?m)^(?i)(multi){1}([[:blank:]]*[A-Za-z]+)*`
+	RegexQueryPipelinedSelect  = `(?m)^(?i)(select){1}([[:blank:]]*(?P<database>[0-9]+)){1}`
+
+	// Regex patterns for intercepted responses
+	RegexResponseEchoError          = `(\*[1-9]+(\r?\n)\$4(\r?\n)(?i)(echo)(\r?\n)){1}(\$[1-9]+(\r?\n)(?P<errorcode>[0-9]+)(\r?\n)){1}`
+	RegexResponsePipelinedEchoError = `(?m)^(?i)(echo){1}([[:blank:]]*(?P<errorcode>[0-9]+)){1}`
 
 	// Error messages
 	FailedWritingResponseErrorMessage = "Error writing the response: %q"
@@ -52,7 +54,7 @@ const (
 
 var (
 
-	// MessageTransaction represents a wrapper for the actual message
+	// MessageTransaction represents a transaction wrapper for the actual message
 	MessageTransaction = [][]byte{
 		[]byte(CommandMulti),
 		[]byte(fmt.Sprintf(CommandSelect, 0)),
@@ -62,17 +64,14 @@ var (
 
 	// QueryFilters groups the filters which will be applied to requested queries before executing them
 	QueryFilters = []string{
-		// TODO: Process MULTI commands. Do we want to support nested MULTI?
 		RegexQueryMulti,
-		// TODO: Allow large responses to remove COMMAND related restrictions
-		RegexQueryCommand,
+		RegexQueryCommand, // TODO: Allow large responses to remove COMMAND related restrictions
 	}
 
 	// PipelinedQueryFilters groups the filters which will be applied to requested queries before executing them
+	// ATTENTION: pipelined queries have not a well-defined format, so they have to be filtered after common flow
 	PipelinedQueryFilters = []string{
-		// TODO: Process MULTI commands. Do we want to support nested MULTI?
 		RegexQueryPipelinedMulti,
-		// TODO: Allow large responses to remove COMMAND related restrictions
 		RegexQueryPipelinedCommand,
 	}
 
@@ -173,28 +172,30 @@ func (p *TCPProxy) setCachedDB(sourceConn *net.Conn, chunk *[]byte) (database in
 	}
 	(*p.Cache).CacheLock.Unlock()
 
+	log.Printf("Cached database: %d", database)
+
 	return database, err
 }
 
 // filterCommands update the transaction message by filtering commands from inside the chunk
 func (p *TCPProxy) filterCommands(chunk *[]byte, transactionMessage *[][]byte) {
 
-	// Filter individual queries by comparing them against patterns
-	for _, filter := range QueryFilters {
-		matchCommandDocs, _ := regexp.Match(filter, *chunk)
-		if matchCommandDocs {
-			(*transactionMessage)[2] = []byte(fmt.Sprintf(CommandEchoError, 403))
-		}
+	// Assume commands are always individual
+	selectedFilters := QueryFilters
+	errorPattern := []byte(fmt.Sprintf(CommandEchoError, 403))
+
+	// Switch to assume we have pipelined commands when the query does NOT start with '*'
+	if startingByte := (*chunk)[0]; startingByte != []byte("*")[0] {
+		selectedFilters = PipelinedQueryFilters
+		errorPattern = []byte(fmt.Sprintf(PipelinedCommandEchoError, 403))
 	}
 
-	// Filter pipelined queries by comparing them against patterns
-	for _, filter := range PipelinedQueryFilters {
+	// Loop over selected filters modifying the chunk
+	for _, filter := range selectedFilters {
 		compiledFilter := regexp.MustCompile(filter)
-		matchFilter := compiledFilter.MatchString(string(*chunk))
+		matchFilter := compiledFilter.Match(*chunk)
 		if matchFilter {
-			(*transactionMessage)[2] = compiledFilter.ReplaceAll(
-				(*transactionMessage)[2],
-				[]byte(fmt.Sprintf(PipelinedCommandEchoError, 403)))
+			(*transactionMessage)[2] = compiledFilter.ReplaceAllLiteral((*transactionMessage)[2], errorPattern)
 		}
 	}
 }
@@ -288,6 +289,7 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		log.Printf("Received Chunk: %q", string(buffer))
 		p.filterCommands(&buffer, &transactionMessage)
 		log.Printf("Modified Chunk: %q", string(transactionMessage[2]))
+		log.Print("\n\n\n\n")
 
 		// Convert the message representation into a bytes before sending
 		modifiedChunk := bytes.Join(transactionMessage, []byte{})
