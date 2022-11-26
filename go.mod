@@ -1,4 +1,4 @@
-module github.com/achetronic/ratomelector
+module github.com/achetronic/predoxy
 
 go 1.18
 

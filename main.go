@@ -2,8 +2,8 @@ package main
 
 import (
 	"flag"
-	"github.com/achetronic/ratomelector/api"
-	"github.com/achetronic/ratomelector/listeners/tcp"
+	"github.com/achetronic/predoxy/api"
+	"github.com/achetronic/predoxy/listeners/tcp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"

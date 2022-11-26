@@ -51,19 +51,19 @@ test: fmt vet
 ##@ Build
 
 .PHONY: build
-build: fmt vet ## Build manager binary.
-	go build -o bin/manager main.go
+build: fmt vet ## Build predoxy binary.
+	go build -o bin/predoxy main.go
 
 .PHONY: run
 run: fmt vet ## Run a controller from your host.
 	go run ./main.go
 
 .PHONY: docker-build
-docker-build: test ## Build docker image with the manager.
+docker-build: test ## Build docker image with the predoxy.
 	docker build -t ${IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
+docker-push: ## Push docker image with the predoxy.
 	docker push ${IMG}
 
 ##@ Deployment

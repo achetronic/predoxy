@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/achetronic/ratomelector/api"
+	"github.com/achetronic/predoxy/api"
 	"github.com/tidwall/resp"
 	"io"
 	"net"
