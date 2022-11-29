@@ -17,8 +17,9 @@ type TCPProxy struct {
 type ForwardCallbackParams struct {
 	SourceConnection *net.Conn
 	DestConnection   *net.Conn
+	Cache            *api.ProxyCache
 	Message          *[]byte
 }
 
-//
+// ForwardCallback represents a function to process a message before writing it to a TCP connection
 type ForwardCallback func(*ForwardCallbackParams) ([]byte, error)
