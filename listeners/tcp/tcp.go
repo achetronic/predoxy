@@ -10,6 +10,7 @@ import (
 	"github.com/achetronic/predoxy/api"
 	"github.com/tidwall/resp"
 	"io"
+	"log"
 	"net"
 	"regexp"
 	"strconv"
@@ -118,6 +119,36 @@ func (p *TCPProxy) createBackendConnection(backendConfig *api.Backend) (backendC
 	}
 
 	return backendConn, err
+}
+
+// readAll buffer each message from the source connection until EOF, and return the whole message
+func (p *TCPProxy) readAllFromConnection(sourceConn *net.Conn) (message []byte, err error) {
+
+	// Exchange buffer
+	tmpBuffer := make([]byte, 250)
+
+	// Buffer for appending the chunks until EOF
+	buffer := make([]byte, 0, ConnectionResponseBufferSize)
+
+	var nRead int
+
+	for {
+		nRead, err = (*sourceConn).Read(tmpBuffer[:cap(tmpBuffer)])
+		if err != nil {
+			if err != io.EOF {
+				return message, err
+			}
+			break
+		}
+
+		buffer = append(buffer, tmpBuffer[:nRead]...)
+
+		if nRead < cap(tmpBuffer) {
+			break
+		}
+	}
+
+	return buffer, err
 }
 
 // getCachedDB returns the index of db for selected connection when already cached
@@ -271,54 +302,38 @@ func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err 
 	return responseBytes, err
 }
 
-// forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
+// forwardPackets TODO
 // This function will be executed as a goroutine
-func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+func (p *TCPProxy) forwardPackets(
+	sourceConn net.Conn,
+	destConn net.Conn,
+	sourceConnClosed chan struct{},
+	pipeline func(message []byte)) {
 
-	// Big exchange buffer
-	buffer := make([]byte, 0, ConnectionResponseBufferSize)
+	var message []byte
+	var err error
 
 	for {
-		// Store into a buffer each read byte from connection until finish
-		n, err := sourceConn.Read(buffer[:cap(buffer)])
+
+		// Read the whole message from the source
+		message, err = p.readAllFromConnection(&sourceConn)
 		if err != nil {
-			if err != io.EOF {
-				p.Logger.Errorf(FailedReadingQueryErrorMessage, err)
-			}
+			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
 			break
 		}
 
-		// Join all read bytes into a bigger buffer
-		buffer = buffer[:n]
+		// Execute the pipeline for the message
+		pipeline(message)
 
-		// Construct a transaction message from the wrapper
-		transactionMessage := MessageTransaction
-		transactionMessage[2] = buffer
-
-		// Parse the request to lazy update cached db index
-		// TODO: Improve the performance of this logic
-		p.setCachedDB(&sourceConn, &buffer)
-		dbIndex, _ := p.getCachedDB(&sourceConn)
-		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
-
-		p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(buffer))
-
-		// Modify the request according to the filters
-		//p.filterCommands(&buffer, &transactionMessage)
-		//p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
-
-		// Convert the message representation into a bytes before sending
-		//modifiedChunk := bytes.Join(transactionMessage, []byte{})
-		modifiedChunk := buffer[:n]
-
-		// Forward the command to the backend
-		_, err = destConn.Write(modifiedChunk)
+		// Write the response to the client
+		_, err = destConn.Write(message)
 		if err != nil {
 			p.Logger.Errorf(FailedWritingQueryErrorMessage, err)
+			break
 		}
 
-		// Clear last read content
-		buffer = make([]byte, 0, ConnectionResponseBufferSize)
+		// Reset the message
+		message = []byte{}
 	}
 
 	if err := sourceConn.Close(); err != nil {
@@ -329,34 +344,59 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 	p.Logger.Debug(ClientConnectionClosedDebugMessage)
 }
 
-// readAll buffer each message from the source connection until EOF, and return the whole message
-func (p *TCPProxy) readAll(sourceConn *net.Conn) (message []byte, err error) {
+// forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
+// This function will be executed as a goroutine
+func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
 
-	// Exchange buffer
-	tmpBuffer := make([]byte, 250)
-
-	// Buffer for appending the chunks until EOF
-	buffer := make([]byte, 0, ConnectionResponseBufferSize)
-
-	var nRead int
+	var message []byte
+	var err error
 
 	for {
-		nRead, err = (*sourceConn).Read(tmpBuffer[:cap(tmpBuffer)])
+
+		// Read the whole message from the source
+		message, err = p.readAllFromConnection(&sourceConn)
 		if err != nil {
-			if err != io.EOF {
-				return message, err
-			}
+			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
 			break
 		}
 
-		buffer = append(buffer, tmpBuffer[:nRead]...)
+		// Construct a transaction message from the wrapper
+		transactionMessage := MessageTransaction
+		transactionMessage[2] = message
 
-		if nRead < cap(tmpBuffer) {
+		// Parse the request to lazy update cached db index
+		// TODO: Improve the performance of this logic
+		p.setCachedDB(&sourceConn, &message)
+		dbIndex, _ := p.getCachedDB(&sourceConn)
+		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
+
+		p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(message))
+
+		// Modify the request according to the filters
+		p.filterCommands(&message, &transactionMessage)
+		p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
+
+		// Convert the message representation into a bytes before sending
+		modifiedChunk := bytes.Join(transactionMessage, []byte{})
+		log.Print(string(modifiedChunk))
+
+		// Write the response to the client
+		_, err = destConn.Write(message)
+		if err != nil {
+			p.Logger.Errorf(FailedWritingQueryErrorMessage, err)
 			break
 		}
+
+		// Reset the message
+		message = []byte{}
 	}
 
-	return buffer, err
+	if err := sourceConn.Close(); err != nil {
+		p.Logger.Errorf(FailedClosingClientConnectionErrorMessage, err)
+	}
+	sourceConnClosed <- struct{}{}
+
+	p.Logger.Debug(ClientConnectionClosedDebugMessage)
 }
 
 // forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
@@ -369,7 +409,7 @@ func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn
 	for {
 
 		// Read the whole message from the source
-		message, err = p.readAll(&sourceConn)
+		message, err = p.readAllFromConnection(&sourceConn)
 		if err != nil {
 			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
 			break
