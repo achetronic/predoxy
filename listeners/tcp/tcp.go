@@ -18,8 +18,8 @@ import (
 
 const (
 	ProtocolTcp                  = "tcp"
-	ConnectionResponseBufferSize = 8 * 1024 // 8MB
-	ConnectionTimeoutSeconds     = 10 * 60  // 10 minutes
+	ConnectionResponseBufferSize = 1024 * 1024 // 200KB
+	ConnectionTimeoutSeconds     = 10 * 60     // 10 minutes
 	DefaultDbIndex               = 0
 
 	// Definitions of common individual commands (used to craft commands)
@@ -82,14 +82,14 @@ var (
 	// QueryFilters groups the filters which will be applied to requested queries before executing them
 	QueryFilters = []string{
 		RegexQueryMulti,
-		RegexQueryCommand, // TODO: Allow large responses to remove COMMAND related restrictions
+		//RegexQueryCommand, // TODO: Allow large responses to remove COMMAND related restrictions
 	}
 
 	// PipelinedQueryFilters groups the filters which will be applied to requested queries before executing them
 	// ATTENTION: pipelined queries have not a well-defined format, so they have to be filtered after common flow
 	PipelinedQueryFilters = []string{
 		RegexQueryPipelinedMulti,
-		RegexQueryPipelinedCommand,
+		//RegexQueryPipelinedCommand,
 	}
 
 	// ProxyErrorCodes represents response error codes and its messages
@@ -304,11 +304,12 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 		p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(buffer))
 
 		// Modify the request according to the filters
-		p.filterCommands(&buffer, &transactionMessage)
-		p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
+		//p.filterCommands(&buffer, &transactionMessage)
+		//p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
 
 		// Convert the message representation into a bytes before sending
-		modifiedChunk := bytes.Join(transactionMessage, []byte{})
+		//modifiedChunk := bytes.Join(transactionMessage, []byte{})
+		modifiedChunk := buffer[:n]
 
 		// Forward the command to the backend
 		_, err = destConn.Write(modifiedChunk)
@@ -328,44 +329,61 @@ func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn,
 	p.Logger.Debug(ClientConnectionClosedDebugMessage)
 }
 
-// forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
-// This function will be executed as a goroutine
-func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+// readAll buffer each message from the source connection until EOF, and return the whole message
+func (p *TCPProxy) readAll(sourceConn *net.Conn) (message []byte, err error) {
 
-	// Big exchange buffer
+	// Exchange buffer
+	tmpBuffer := make([]byte, 250)
+
+	// Buffer for appending the chunks until EOF
 	buffer := make([]byte, 0, ConnectionResponseBufferSize)
 
-	var responseBytes []byte
+	var nRead int
 
 	for {
-		// Read each message from the source
-		n, err := sourceConn.Read(buffer[:cap(buffer)])
+		nRead, err = (*sourceConn).Read(tmpBuffer[:cap(tmpBuffer)])
 		if err != nil {
 			if err != io.EOF {
-				p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
+				return message, err
 			}
 			break
 		}
 
-		buffer = buffer[:n]
+		buffer = append(buffer, tmpBuffer[:nRead]...)
 
-		p.Logger.Debugf(ResponseBeforeFilterDebugMessage, string(buffer))
-
-		// Parse the chunk to transform transaction into a single command request
-		// Ref: https://pkg.go.dev/github.com/tidwall/resp#section-readme
-		responseBytes, err = p.filterResponse(buffer)
-		if err != nil {
-			p.Logger.Errorf(FailedParsingResponseErrorMessage, err)
+		if nRead < cap(tmpBuffer) {
+			break
 		}
-		p.Logger.Debugf(ResponseAfterFilterDebugMessage, string(responseBytes))
+	}
 
-		_, err = destConn.Write(responseBytes)
+	return buffer, err
+}
+
+// forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
+// This function will be executed as a goroutine
+func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
+
+	var message []byte
+	var err error
+
+	for {
+
+		// Read the whole message from the source
+		message, err = p.readAll(&sourceConn)
+		if err != nil {
+			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
+			break
+		}
+
+		// Write the response to the client
+		_, err = destConn.Write(message)
 		if err != nil {
 			p.Logger.Errorf(FailedWritingResponseErrorMessage, err)
+			break
 		}
 
-		// Clear last read content
-		buffer = make([]byte, 0, ConnectionResponseBufferSize)
+		// Reset the message
+		message = []byte{}
 	}
 
 	// Send the right response to the user
