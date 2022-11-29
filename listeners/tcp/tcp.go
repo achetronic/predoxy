@@ -302,16 +302,23 @@ func (p *TCPProxy) filterResponse(byteString []byte) (responseBytes []byte, err 
 	return responseBytes, err
 }
 
-// forwardPackets TODO
+// forwardPackets forwards packets from source to destination, executing a callback in the middle to process messages
 // This function will be executed as a goroutine
 func (p *TCPProxy) forwardPackets(
 	sourceConn net.Conn,
 	destConn net.Conn,
 	sourceConnClosed chan struct{},
-	pipeline func(message []byte)) {
+	callback ForwardCallback) {
 
 	var message []byte
 	var err error
+
+	// Create params structure to pass to the callback
+	callbackParameters := ForwardCallbackParams{
+		SourceConnection: &sourceConn,
+		DestConnection:   &destConn,
+		Message:          &message,
+	}
 
 	for {
 
@@ -323,7 +330,12 @@ func (p *TCPProxy) forwardPackets(
 		}
 
 		// Execute the pipeline for the message
-		pipeline(message)
+		message, err = callback(&callbackParameters)
+		if err != nil {
+			log.Print("Me acabo de cagar en todo")
+			//p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
+			break
+		}
 
 		// Write the response to the client
 		_, err = destConn.Write(message)
@@ -342,6 +354,32 @@ func (p *TCPProxy) forwardPackets(
 	sourceConnClosed <- struct{}{}
 
 	p.Logger.Debug(ClientConnectionClosedDebugMessage)
+}
+
+// doSomethingTest TODO
+func (p *TCPProxy) doSomethingTest(parameters *ForwardCallbackParams) (message []byte, err error) {
+
+	// Construct a transaction message from the wrapper
+	transactionMessage := MessageTransaction
+	transactionMessage[2] = *parameters.Message
+
+	// Parse the request to lazy update cached db index
+	// TODO: Improve the performance of this logic
+	p.setCachedDB(parameters.SourceConnection, parameters.Message)
+	dbIndex, _ := p.getCachedDB(parameters.SourceConnection)
+	transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
+
+	p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(*parameters.Message))
+
+	// Modify the request according to the filters
+	p.filterCommands(parameters.Message, &transactionMessage)
+	p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
+
+	// Convert the message representation into a bytes before sending
+	modifiedMessage := bytes.Join(transactionMessage, []byte{})
+	log.Print(string(modifiedMessage))
+
+	return modifiedMessage, err
 }
 
 // forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
@@ -456,10 +494,18 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 	backendClosed := make(chan struct{}, 1)  // srvConn
 
 	// Send the request from the frontend to the backend server
-	go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
+	//go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
+	go p.forwardPackets(frontendConn, backendConn, frontendClosed, func(parameters *ForwardCallbackParams) ([]byte, error) {
+		log.Print("Lo toy haciendo con el forwarder puro de ida")
+		return *parameters.Message, nil
+	})
 
-	// Send the response back to frontend contacting us.
-	go p.forwardResponsePackets(backendConn, frontendConn, backendClosed)
+	// Send the response back to frontend contacting us
+	//go p.forwardResponsePackets(backendConn, frontendConn, backendClosed)
+	go p.forwardPackets(backendConn, frontendConn, backendClosed, func(parameters *ForwardCallbackParams) ([]byte, error) {
+		log.Print("Lo toy haciendo con el forwarder puro de vuelta")
+		return *parameters.Message, nil
+	})
 
 	// wait for one half of the proxy to exit, then trigger a shutdown of the
 	// other half by calling CloseRead(). This will break the read loop in the
