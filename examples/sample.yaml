@@ -1,8 +1,9 @@
 apiVersion: predoxy.achetronic.com/v1beta1
 kind: Config
 metadata:
-  name: monolith-redis-proxy
+  name: sample-proxy
 spec:
+  # Parameters related to networking capabilities
   listener:
     protocol: tcp
     host: 0.0.0.0
@@ -11,3 +12,15 @@ spec:
     host: localhost
     port: 6379
 
+  # Parameters to configure plugins used to process messages and manage
+  # Be careful here because the plugins are used following the list arrangement
+  # plugins.incoming: [] are the plugins used for incoming messages
+  # plugins.outgoing: [] are the plugins used for outgoing messages
+  plugins:
+    incoming:
+    - name: do-nothing
+      path: do-nothing.so
+
+    outgoing:
+    - name: do-nothing
+      path: do-nothing.so

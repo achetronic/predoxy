@@ -13,7 +13,7 @@ func getTCPAddress(host string, port int) (address *net.TCPAddr, err error) {
 	return address, err
 }
 
-// generateConnectionPoolKey return a new connection track key from a UDP Addr
+// generateConnectionPoolKey return a new connection track key for a TCP connection
 func generateConnectionPoolKey(conn *net.Conn) (conTrackKey *api.ConnectionTrackKey, err error) {
 
 	address := (*conn).RemoteAddr().String()

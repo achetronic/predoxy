@@ -5,6 +5,7 @@ package tcp
 
 import (
 	"github.com/achetronic/predoxy/api"
+	"github.com/achetronic/predoxy/pipelines"
 	"io"
 	"net"
 	"time"
@@ -85,16 +86,16 @@ func (p *TCPProxy) forwardPackets(
 	sourceConn net.Conn,
 	destConn net.Conn,
 	sourceConnClosed chan struct{},
-	callback ForwardCallback) {
+	callback pipelines.ForwardCallback) {
 
 	var message []byte
 	var err error
 
 	// Create params structure to pass to the callback
-	callbackParameters := ForwardCallbackParams{
+	callbackParameters := pipelines.ForwardCallbackParams{
 		SourceConnection: &sourceConn,
 		DestConnection:   &destConn,
-		Cache:            p.Cache,
+		ProxyCache:       p.Cache,
 		Message:          &message,
 	}
 
@@ -133,97 +134,6 @@ func (p *TCPProxy) forwardPackets(
 	p.Logger.Debug(ConnectionClosedDebugMessage)
 }
 
-//// forwardCommandPackets forwards TCP packets from a source stream to destination steam, converting it into transaction
-//// This function will be executed as a goroutine
-//func (p *TCPProxy) forwardCommandPackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
-//
-//	var message []byte
-//	var err error
-//
-//	for {
-//
-//		// Read the whole message from the source
-//		message, err = p.readAllFromConnection(&sourceConn)
-//		if err != nil {
-//			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
-//			break
-//		}
-//
-//		// Construct a transaction message from the wrapper
-//		transactionMessage := MessageTransaction
-//		transactionMessage[2] = message
-//
-//		// Parse the request to lazy update cached db index
-//		// TODO: Improve the performance of this logic
-//		p.setCachedDB(&sourceConn, &message)
-//		dbIndex, _ := p.getCachedDB(&sourceConn)
-//		transactionMessage[1] = []byte(fmt.Sprintf(CommandSelect, dbIndex))
-//
-//		p.Logger.Debugf(QueryBeforeFilterDebugMessage, string(message))
-//
-//		// Modify the request according to the filters
-//		p.filterCommands(&message, &transactionMessage)
-//		p.Logger.Debugf(QueryAfterFilterDebugMessage, string(transactionMessage[2]))
-//
-//		// Convert the message representation into a bytes before sending
-//		modifiedChunk := bytes.Join(transactionMessage, []byte{})
-//		log.Print(string(modifiedChunk))
-//
-//		// Write the response to the client
-//		_, err = destConn.Write(message)
-//		if err != nil {
-//			p.Logger.Errorf(FailedWritingQueryErrorMessage, err)
-//			break
-//		}
-//
-//		// Reset the message
-//		message = []byte{}
-//	}
-//
-//	if err := sourceConn.Close(); err != nil {
-//		p.Logger.Errorf(FailedClosingClientConnectionErrorMessage, err)
-//	}
-//	sourceConnClosed <- struct{}{}
-//
-//	p.Logger.Debug(ClientConnectionClosedDebugMessage)
-//}
-//
-//// forwardResponsePackets forwards TCP packets from a source stream to destination steam, offloading transaction
-//// This function will be executed as a goroutine
-//func (p *TCPProxy) forwardResponsePackets(sourceConn net.Conn, destConn net.Conn, sourceConnClosed chan struct{}) {
-//
-//	var message []byte
-//	var err error
-//
-//	for {
-//
-//		// Read the whole message from the source
-//		message, err = p.readAllFromConnection(&sourceConn)
-//		if err != nil {
-//			p.Logger.Errorf(FailedReadingResponseErrorMessage, err)
-//			break
-//		}
-//
-//		// Write the response to the client
-//		_, err = destConn.Write(message)
-//		if err != nil {
-//			p.Logger.Errorf(FailedWritingResponseErrorMessage, err)
-//			break
-//		}
-//
-//		// Reset the message
-//		message = []byte{}
-//	}
-//
-//	// Send the right response to the user
-//	if err := sourceConn.Close(); err != nil {
-//		p.Logger.Errorf(FailedClosingServerConnectionErrorMessage, err)
-//	}
-//	sourceConnClosed <- struct{}{}
-//
-//	p.Logger.Debug(ServerConnectionClosedDebugMessage)
-//}
-
 // handleRequest handle incoming requests, from given frontend to given backend server
 // This function will be executed as a goroutine
 func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
@@ -246,11 +156,11 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 
 	// Send the request from the frontend to the backend server
 	//go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
-	go p.forwardPackets(frontendConn, backendConn, frontendClosed, p.incomingMessagesPipeline)
+	go p.forwardPackets(frontendConn, backendConn, frontendClosed, pipelines.IncomingMessagesPipeline)
 
 	// Send the response back to frontend contacting us
 	//go p.forwardResponsePackets(backendConn, frontendConn, backendClosed)
-	go p.forwardPackets(backendConn, frontendConn, backendClosed, p.outgoingMessagesPipeline)
+	go p.forwardPackets(backendConn, frontendConn, backendClosed, pipelines.OutgoingMessagesPipeline)
 
 	// wait for one half of the proxy to exit, then trigger a shutdown of the
 	// other half by calling CloseRead(). This will break the read loop in the
