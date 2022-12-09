@@ -1,7 +1,6 @@
 package tcp
 
 import (
-	"github.com/achetronic/predoxy/api"
 	"net"
 	"regexp"
 	"strconv"
@@ -11,27 +10,6 @@ import (
 func getTCPAddress(host string, port int) (address *net.TCPAddr, err error) {
 	address, err = net.ResolveTCPAddr(ProtocolTcp, net.JoinHostPort(host, strconv.Itoa(port)))
 	return address, err
-}
-
-// generateConnectionPoolKey return a new connection track key for a TCP connection
-func generateConnectionPoolKey(conn *net.Conn) (conTrackKey *api.ConnectionTrackKey, err error) {
-
-	address := (*conn).RemoteAddr().String()
-
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return conTrackKey, err
-	}
-
-	parsedPort, err := strconv.Atoi(port)
-	if err != nil {
-		return conTrackKey, err
-	}
-
-	return &api.ConnectionTrackKey{
-		IP:   host,
-		Port: parsedPort,
-	}, err
 }
 
 // getRegexNamedGroups return a map of named groups and their values

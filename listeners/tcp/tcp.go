@@ -5,9 +5,10 @@ package tcp
 
 import (
 	"github.com/achetronic/predoxy/api"
-	"github.com/achetronic/predoxy/pipelines"
+	"github.com/achetronic/predoxy/pipeline"
 	"io"
 	"net"
+	"plugin"
 	"time"
 )
 
@@ -30,6 +31,20 @@ const (
 	// Debug messages
 	ConnectionClosedDebugMessage = "Connection was closed"
 )
+
+// loadPlugins read the config looking for plugins and load them into cache
+func (p *TCPProxy) loadPlugins() (err error) {
+
+	// 0. Init cache for Plugins related structs
+	(*p.Cache).PluginPool = make(map[string]*plugin.Symbol)
+
+	// 1. Process config to load the plugins' pointers into cache. If a name is not regex valid, explode
+	// 2. Store the plugin names in order for incoming
+	// 3. Store the plugin names in order for outgoing
+
+	//(*p.Cache).PluginPool = make(api.ConnectionPoolMap)
+	return nil
+}
 
 // createBackendConnection create a connection to the given backend on ConnectionPoolTCP,
 // and returns a pointer to the connection and its id
@@ -86,16 +101,16 @@ func (p *TCPProxy) forwardPackets(
 	sourceConn net.Conn,
 	destConn net.Conn,
 	sourceConnClosed chan struct{},
-	callback pipelines.ForwardCallback) {
+	callback pipeline.ForwardCallback) {
 
 	var message []byte
 	var err error
 
 	// Create params structure to pass to the callback
-	callbackParameters := pipelines.ForwardCallbackParams{
+	callbackParameters := pipeline.ForwardCallbackParams{
+		ProxyCache:       p.Cache,
 		SourceConnection: &sourceConn,
 		DestConnection:   &destConn,
-		ProxyCache:       p.Cache,
 		Message:          &message,
 	}
 
@@ -156,11 +171,11 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 
 	// Send the request from the frontend to the backend server
 	//go p.forwardCommandPackets(frontendConn, backendConn, frontendClosed)
-	go p.forwardPackets(frontendConn, backendConn, frontendClosed, pipelines.IncomingMessagesPipeline)
+	go p.forwardPackets(frontendConn, backendConn, frontendClosed, pipeline.ProcessIncomingMessages)
 
 	// Send the response back to frontend contacting us
 	//go p.forwardResponsePackets(backendConn, frontendConn, backendClosed)
-	go p.forwardPackets(backendConn, frontendConn, backendClosed, pipelines.OutgoingMessagesPipeline)
+	go p.forwardPackets(backendConn, frontendConn, backendClosed, pipeline.ProcessOutgoingMessages)
 
 	// wait for one half of the proxy to exit, then trigger a shutdown of the
 	// other half by calling CloseRead(). This will break the read loop in the
@@ -196,7 +211,7 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 func (p *TCPProxy) Launch() (err error) {
 
 	// Init the cache for this proxy
-	(*p.Cache).ConnectionPool = make(api.ConnectionPoolMap)
+	//(*p.Cache).ConnectionPool = make(api.ConnectionPoolMap)
 
 	// Resolve frontend IP address from config
 	frontendHost, err := getTCPAddress(p.Config.Listener.Host, p.Config.Listener.Port)
