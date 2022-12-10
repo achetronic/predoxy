@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
 	"time"
 )
 
@@ -47,7 +48,6 @@ func LoadYAMLConfig(filePath string) (config api.Config, err error) {
 	return config, err
 }
 
-//
 func main() {
 
 	// Feed the seed to be able to get random numbers safe across the code
@@ -90,10 +90,6 @@ func main() {
 	// Set the configuration inside the proxy
 	mainProxy.Config = &config.Spec
 
-	// TODO: REMOVE THIS DEBUGGING SHIT
-	mainProxy.Logger.Debug(mainProxy.Config)
-	mainProxy.Logger.Debug(mainProxy.Cache.ConnectionPool)
-
 	var waitForEverything chan struct{}
 
 	// Launch all the listeners according to their configuration
@@ -101,7 +97,8 @@ func main() {
 	go func() {
 		err := mainProxy.Launch()
 		if err != nil {
-
+			mainProxy.Logger.Fatal(err)
+			os.Exit(1)
 		}
 	}()
 

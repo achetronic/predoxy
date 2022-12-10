@@ -5,10 +5,10 @@
 A hackable TCP proxy where the user decide what to do with the incoming message and the outgoing response, 
 implementing plugins as Go functions
 
-The proxy provides some useful data and memory space to each plugin execution to:
+The proxy provides some useful data and memory space for each plugin execution to:
 
 - Know information about the source/destination connection
-- Store data on a common space of memory
+- Cache data on a common space of memory
 - Read/Write the message on the fly
 
 ## Use case
@@ -16,11 +16,13 @@ The proxy provides some useful data and memory space to each plugin execution to
 This is complicated to be defined, but let me give you some ideas about what to do with the plugins:
 
 - Filter/change messages according to for regex patterns. This allows to do things like neutralizing commands on 
-  Redis like EVAL, or converting them in something more creative, like ECHO clauses
+  Redis like EVAL, or converting them in something more creative, like ECHO clauses, or even translate a whole protocol
+  into another
 - Use the InMemory cache to store data from previous requests coming from a source. These data can be used to inject
   or parse the message in following requests
 - Enforce policies not covered by servers like Redis, i.e, forcing AUTH for SELECTed DBs, caching the requests 
   into the cache
+- Debug your own coded proxies logging all the messages in the middle
 
 ## Requirements
 
@@ -55,7 +57,60 @@ This is complicated to be defined, but let me give you some ideas about what to 
     ```
    
 ## How to build a plugin
-TBD
+
+All the plugins must implement the `Plugin` interface, which can be imported from `github.com/achetronic/predoxy/api`
+
+Examples are far better than explanations, so you have the implementation of `do-nothing` in the following lines:
+
+```go 
+package main
+
+import (
+	"github.com/achetronic/predoxy/api"
+	"log"
+)
+
+type customPlugin string
+
+// OnReceive TODO
+func (p *customPlugin) OnReceive(parameters *api.PluginParams) error {
+
+	log.Print("Basically, I'm not doing anything on receive")
+	log.Print(string(*(*parameters).Message))
+	return nil
+}
+
+// OnResponse TODO
+func (p *customPlugin) OnResponse(parameters *api.PluginParams) error {
+
+	log.Print("Basically, I'm not doing anything on response")
+	log.Print(string(*(*parameters).Message))
+	return nil
+}
+
+var Plugin customPlugin
+```
+
+> The previous example can be found on [examples](examples) directory and probably some others could be added in the future.
+
+As you can see, `*api.PluginParams` is always injected, with some useful things that can be used to craft 
+meaningful plugins:
+
+```go
+type PluginParams struct {
+	SourceConnection *net.Conn
+	DestConnection   *net.Conn
+	Message          *[]byte
+}
+```
+
+> **ATTENTION:** This proxy is created using a lof of pointers to increase the performance. Those pointers mean that
+> you have to code carefully your plugins to decrease the attack surface your own. I recommend you to use only
+> plugins built from sources you trust.
+
+## How to configure
+
+A complete example of configuration, can be found on [examples](examples) directory
 
 ## Flags
 
@@ -76,15 +131,9 @@ predoxy --zap-log-level debug \
         --config "my/path/config.yaml" 
 ```
 
-To run the same into a Docker container:
-
-```bash
-docker run TBD
-```
-
 ## How to contribute
 
-We are open to external collaborations for this project: improvements, bugfixes, whatever.
+We are open to external collaborations for this project: improvements, bugfixes, plugins examples, whatever.
 
 For doing it, open an issue to discuss the need of the changes, then:
 
@@ -93,6 +142,3 @@ For doing it, open an issue to discuss the need of the changes, then:
 - Open a PR and wait for review
 
 The code will be reviewed and tested (always)
-
-> We are developers and hate bad code. For that reason we ask you the highest quality
-> on each line of code to improve this project on each iteration.

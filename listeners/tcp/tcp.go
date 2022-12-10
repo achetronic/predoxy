@@ -4,11 +4,14 @@ package tcp
 // Ref: https://gist.github.com/jbardin/821d08cb64c01c84b81a
 
 import (
+	"fmt"
 	"github.com/achetronic/predoxy/api"
 	"github.com/achetronic/predoxy/pipeline"
+	"github.com/pkg/errors"
 	"io"
 	"net"
 	"plugin"
+	"strconv"
 	"time"
 )
 
@@ -18,6 +21,8 @@ const (
 	ConnectionTimeoutSeconds     = 10 * 60     // 10 minutes
 
 	// Error messages
+	FailedLoadingPluginErrorMessage      = "Error loading a plugin: %s"
+	PluginNotFoundErrorMessage           = "Plugin not found: %s"
 	FailedReadingConnectionErrorMessage  = "Error reading from connection socket: %q"
 	FailedWritingConnectionErrorMessage  = "Error writing to the connection socket: %q"
 	FailedProcessingPipelineErrorMessage = "Error parsing the message: %q"
@@ -32,17 +37,65 @@ const (
 	ConnectionClosedDebugMessage = "Connection was closed"
 )
 
-// loadPlugins read the config looking for plugins and load them into cache
-func (p *TCPProxy) loadPlugins() (err error) {
+// getTCPAddress return a pointer to an object TCPAddr built from strings
+func getTCPAddress(host string, port int) (address *net.TCPAddr, err error) {
+	address, err = net.ResolveTCPAddr(ProtocolTcp, net.JoinHostPort(host, strconv.Itoa(port)))
+	return address, err
+}
+
+// cachePlugins read the config looking for plugins and load them into cache
+func (p *TCPProxy) cachePlugins() (err error) {
 
 	// 0. Init cache for Plugins related structs
-	(*p.Cache).PluginPool = make(map[string]*plugin.Symbol)
+	(*p.Cache).PluginCache.Pool = make(map[string]*api.Plugin)
 
-	// 1. Process config to load the plugins' pointers into cache. If a name is not regex valid, explode
-	// 2. Store the plugin names in order for incoming
-	// 3. Store the plugin names in order for outgoing
+	var plug *plugin.Plugin
 
-	//(*p.Cache).PluginPool = make(api.ConnectionPoolMap)
+	// 1. Process config to load the plugins' pointers into cache
+	for _, pluginParams := range p.Config.Pipelines.Plugins {
+
+		// 1.1 Open the .so file to load the symbols
+		plug, err = plugin.Open(pluginParams.Path)
+		if err != nil {
+			return err
+		}
+
+		// 1.2. look up the symbols (an exported function or variable) and store them into the cache
+		symPlugin, err := plug.Lookup("Plugin")
+		if err != nil {
+			return err
+		}
+
+		// 1.3. Assert that loaded symbol is of a desired type
+		// in this case interface type Greeter (defined above)
+		var checkedPlugin api.Plugin
+		checkedPlugin, ok := symPlugin.(api.Plugin)
+		if !ok {
+			return err
+		}
+
+		// 1.4 Store the Plugin symbol into cache
+		(*p.Cache).PluginCache.Pool[pluginParams.Name] = &checkedPlugin
+	}
+
+	// 2. Check whether all OnReceive plugins are present
+	for _, pluginName := range p.Config.Pipelines.OnReceive {
+		if _, ok := (*p.Cache).PluginCache.Pool[pluginName]; !ok {
+			err = errors.New(fmt.Sprintf(PluginNotFoundErrorMessage, pluginName))
+			return
+		}
+	}
+	(*p.Cache).PluginCache.ExecutionOrder.OnReceive = p.Config.Pipelines.OnReceive
+
+	// 3. Check whether all OnResponse plugins are present
+	for _, pluginName := range p.Config.Pipelines.OnResponse {
+		if _, ok := (*p.Cache).PluginCache.Pool[pluginName]; !ok {
+			err = errors.New(fmt.Sprintf(PluginNotFoundErrorMessage, pluginName))
+			return
+		}
+	}
+	(*p.Cache).PluginCache.ExecutionOrder.OnResponse = p.Config.Pipelines.OnResponse
+
 	return nil
 }
 
@@ -101,13 +154,13 @@ func (p *TCPProxy) forwardPackets(
 	sourceConn net.Conn,
 	destConn net.Conn,
 	sourceConnClosed chan struct{},
-	callback pipeline.ForwardCallback) {
+	callback api.PipelineCallback) {
 
 	var message []byte
 	var err error
 
 	// Create params structure to pass to the callback
-	callbackParameters := pipeline.ForwardCallbackParams{
+	callbackParameters := api.PipelineCallbackParams{
 		ProxyCache:       p.Cache,
 		SourceConnection: &sourceConn,
 		DestConnection:   &destConn,
@@ -210,8 +263,12 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 // Launch start a listener loop to forward traffic to backend servers
 func (p *TCPProxy) Launch() (err error) {
 
-	// Init the cache for this proxy
-	//(*p.Cache).ConnectionPool = make(api.ConnectionPoolMap)
+	// Load all the plugins into memory for speed
+	err = p.cachePlugins()
+	if err != nil {
+		p.Logger.Errorf(FailedLoadingPluginErrorMessage, err)
+		return err
+	}
 
 	// Resolve frontend IP address from config
 	frontendHost, err := getTCPAddress(p.Config.Listener.Host, p.Config.Listener.Port)

@@ -1,22 +1,26 @@
 package main
 
 import (
-	"github.com/achetronic/predoxy/pipeline"
+	"github.com/achetronic/predoxy/api"
 	"log"
 )
 
-// OnReceive TODO
-func OnReceive(parameters *pipeline.ForwardCallbackParams) error {
+type customPlugin string
 
-	log.Print((*parameters).Message)
+// OnReceive TODO
+func (p *customPlugin) OnReceive(parameters *api.PluginParams) error {
+
+	log.Print("Basically, I'm not doing anything on receive")
+	log.Print(string(*(*parameters).Message))
 	return nil
 }
 
 // OnResponse TODO
-func OnResponse(parameters *pipeline.ForwardCallbackParams) error {
+func (p *customPlugin) OnResponse(parameters *api.PluginParams) error {
 
-	log.Print((*parameters).Message)
+	log.Print("Basically, I'm not doing anything on response")
+	log.Print(string(*(*parameters).Message))
 	return nil
 }
 
-func main() {}
+var Plugin customPlugin

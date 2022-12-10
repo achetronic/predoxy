@@ -10,7 +10,7 @@ spec:
     port: 6381
   backend:
     host: localhost
-    port: 6379
+    port: 6380
 
   # Parameters to configure plugins used to process messages and manage
   # Be careful here because the plugins are used following the list arrangement

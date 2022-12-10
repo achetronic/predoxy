@@ -13,17 +13,17 @@ type Backend struct {
 	Port int    `yaml:"port,omitempty"`
 }
 
-// Plugin represents a plugin definition
-type Plugin struct {
+// PluginConfig represents a plugin definition
+type PluginConfig struct {
 	Name string `yaml:"name,omitempty"`
 	Path string `yaml:"path,omitempty"`
 }
 
 // Pipelines represents the configuration related to plugins and how they are executed
 type Pipelines struct {
-	Plugins    []Plugin `yaml:"plugins,omitempty"`
-	OnReceive  []string `yaml:"onReceive,omitempty"`
-	OnResponse []string `yaml:"onResponse,omitempty"`
+	Plugins    []PluginConfig `yaml:"plugins,omitempty"`
+	OnReceive  []string       `yaml:"onReceive,omitempty"`
+	OnResponse []string       `yaml:"onResponse,omitempty"`
 }
 
 // Proxy represents a group composed by all the pieces needed to forward and balance the traffic for each request
