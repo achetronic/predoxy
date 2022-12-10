@@ -1,23 +1,22 @@
 package api
 
-import (
-	"sync"
-)
+import "sync"
 
-// ConnectionTrackKey represents a key unique key generated from connection data
-// This type is used on UDP connections. Being connectionless, the requesters' personal data are
-// used as unique identifier for the connection
-type ConnectionTrackKey struct {
-	IP   string
-	Port int
+// PluginCache represents TODO
+type PluginCache struct {
+
+	// Pool represents a map where the key is the name of the plugin,
+	// and the value is a pointer to the plugin loaded on memory
+	Pool map[string]*Plugin
+
+	ExecutionOrder struct {
+		// OnReceive stores the execution order of the plugins for incoming messages
+		OnReceive []string
+
+		// OnResponse stores the execution order of the plugins for outgoing messages
+		OnResponse []string
+	}
 }
-
-type ConnectionTrackStorage struct {
-	RedisSelectedDB int
-}
-
-// ConnectionPoolMap is a type to store connection track keys for UDP connections
-type ConnectionPoolMap map[ConnectionTrackKey]ConnectionTrackStorage
 
 // ProxyCache represents the cache storage for any proxy
 type ProxyCache struct {
@@ -26,6 +25,7 @@ type ProxyCache struct {
 	// to avoid too much overrides at the same time
 	CacheLock sync.Mutex
 
-	// ConnectionPool is a table storing some useful data related to the source of connection
-	ConnectionPool ConnectionPoolMap
+	// PluginCache store the plugins loaded on memory and its execution order
+	// from the config
+	PluginCache PluginCache
 }

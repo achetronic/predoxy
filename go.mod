@@ -3,7 +3,6 @@ module github.com/achetronic/predoxy
 go 1.18
 
 require (
-	github.com/tidwall/resp v0.1.1
 	go.uber.org/zap v1.23.0
 	gopkg.in/yaml.v3 v3.0.1
 )
