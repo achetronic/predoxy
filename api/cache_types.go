@@ -1,6 +1,9 @@
 package api
 
-import "sync"
+import (
+	"github.com/allegro/bigcache/v3"
+	"sync"
+)
 
 // PluginCache represents TODO
 type PluginCache struct {
@@ -8,6 +11,11 @@ type PluginCache struct {
 	// Pool represents a map where the key is the name of the plugin,
 	// and the value is a pointer to the plugin loaded on memory
 	Pool map[string]*Plugin
+
+	// LocalCachePool represents a map where the key is the name of the plugin,
+	// and the value is a pointer to an instance of BigCache.
+	// This is only created when 'cache: true' on configuration
+	LocalCachePool map[string]*bigcache.BigCache
 
 	ExecutionOrder struct {
 		// OnReceive stores the execution order of the plugins for incoming messages
