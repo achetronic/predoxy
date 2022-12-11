@@ -5,22 +5,29 @@ metadata:
 spec:
   # Parameters related to networking capabilities
   listener:
-    protocol: tcp
+    protocol: tcp # Currently, only 'tcp' is available
     host: 0.0.0.0
     port: 6381
   backend:
     host: localhost
     port: 6380
 
-  # Parameters to configure plugins used to process messages and manage
-  # Be careful here because the plugins are used following the list arrangement
+  # Parameters to configure plugins used to process messages
   pipelines:
     plugins:
       - name: do-nothing
         path: do-nothing.so
+        cache: false
 
-    # The following lists TODO
+      - name: use-cache
+        path: use-cache.so # This path is the same as the predoxy binary
+        cache: true # Each plugin can ask for an individual instance of BigCache
+
+    # The following lists define the order to execute the plugins
+    # when a message is received or the response is going to be sent
     onReceive:
       - do-nothing
+      - use-cache
     onResponse:
+      - use-cache
       - do-nothing

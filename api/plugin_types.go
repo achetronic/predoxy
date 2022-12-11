@@ -1,12 +1,16 @@
 package api
 
-import "net"
+import (
+	"github.com/allegro/bigcache/v3"
+	"net"
+)
 
 // PluginParams represents the parameters passed to all functions for Plugin interface
 type PluginParams struct {
 	SourceConnection *net.Conn
 	DestConnection   *net.Conn
 	Message          *[]byte
+	LocalCache       *bigcache.BigCache
 }
 
 // Plugin represents the interface that must be implemented by any plugin

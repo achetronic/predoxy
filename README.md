@@ -5,17 +5,17 @@
 A hackable TCP proxy where the user decide what to do with the incoming message and the outgoing response, 
 implementing plugins as Go functions
 
-The proxy provides some useful data and memory space for each plugin execution to:
+The proxy injects useful parameters for each plugin execution to:
 
 - Know information about the source/destination connection
-- Cache data on a common space of memory
-- Read/Write the message on the fly
+- Cache data on an individual space of memory
+- Read/write the message on the fly
 
 ## Use case
 
 This is complicated to be defined, but let me give you some ideas about what to do with the plugins:
 
-- Filter/change messages according to for regex patterns. This allows to do things like neutralizing commands on 
+- Filter/change messages according to regex patterns. This allows to do things like neutralizing commands on 
   Redis like EVAL, or converting them in something more creative, like ECHO clauses, or even translate a whole protocol
   into another
 - Use the InMemory cache to store data from previous requests coming from a source. These data can be used to inject
@@ -101,12 +101,22 @@ type PluginParams struct {
 	SourceConnection *net.Conn
 	DestConnection   *net.Conn
 	Message          *[]byte
+	LocalCache       *bigcache.BigCache // Ref: https://github.com/allegro/bigcache
 }
 ```
 
 > **ATTENTION:** This proxy is created using a lof of pointers to increase the performance. Those pointers mean that
 > you have to code carefully your plugins to decrease the attack surface your own. I recommend you to use only
 > plugins built from sources you trust.
+
+Once you have your plugin ready to rock, compile it into a `.so` executing the following from the root path of it:
+
+```console
+go build --buildmode=plugin
+```
+
+If everything worked fine, this will generate the .so file. Just set the path to your `.so` files on the `config.yaml`
+and everything will be ready.
 
 ## How to configure
 
@@ -135,7 +145,7 @@ predoxy --zap-log-level debug \
 
 We are open to external collaborations for this project: improvements, bugfixes, plugins examples, whatever.
 
-For doing it, open an issue to discuss the need of the changes, then:
+For doing it, open an issue to discuss the changes, then:
 
 - Fork the repository
 - Make your changes to the code

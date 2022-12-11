@@ -4,9 +4,11 @@ package tcp
 // Ref: https://gist.github.com/jbardin/821d08cb64c01c84b81a
 
 import (
+	"context"
 	"fmt"
 	"github.com/achetronic/predoxy/api"
 	"github.com/achetronic/predoxy/pipeline"
+	"github.com/allegro/bigcache/v3"
 	"github.com/pkg/errors"
 	"io"
 	"net"
@@ -17,8 +19,9 @@ import (
 
 const (
 	ProtocolTcp                  = "tcp"
-	ConnectionResponseBufferSize = 1024 * 1024 // 200KB
-	ConnectionTimeoutSeconds     = 10 * 60     // 10 minutes
+	ConnectionResponseBufferSize = 32 * 1024 // 32KB
+	ConnectionTimeoutSeconds     = 10 * 60   // 10 minutes
+	BigCacheLifeWindowMinutes    = 10
 
 	// Error messages
 	FailedLoadingPluginErrorMessage      = "Error loading a plugin: %s"
@@ -48,6 +51,7 @@ func (p *TCPProxy) cachePlugins() (err error) {
 
 	// 0. Init cache for Plugins related structs
 	(*p.Cache).PluginCache.Pool = make(map[string]*api.Plugin)
+	(*p.Cache).PluginCache.LocalCachePool = make(map[string]*bigcache.BigCache)
 
 	var plug *plugin.Plugin
 
@@ -76,6 +80,17 @@ func (p *TCPProxy) cachePlugins() (err error) {
 
 		// 1.4 Store the Plugin symbol into cache
 		(*p.Cache).PluginCache.Pool[pluginParams.Name] = &checkedPlugin
+
+		// 1.5 Create an instance of BigCache when plugin requested it
+		if pluginParams.Cache != true {
+			continue
+		}
+
+		localCache, err := bigcache.New(context.Background(), bigcache.DefaultConfig(BigCacheLifeWindowMinutes*time.Minute))
+		if err != nil {
+			return err
+		}
+		(*p.Cache).PluginCache.LocalCachePool[pluginParams.Name] = localCache
 	}
 
 	// 2. Check whether all OnReceive plugins are present
