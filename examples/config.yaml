@@ -1,5 +1,3 @@
-apiVersion: predoxy.achetronic.com/v1beta1
-kind: Config
 metadata:
   name: sample-proxy
 spec:

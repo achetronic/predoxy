@@ -5,7 +5,7 @@ import (
 )
 
 // ProcessIncomingMessages implements the pipeline to process all incoming commands from the clients
-func ProcessIncomingMessages(parameters *api.PipelineCallbackParams) ([]byte, error) {
+func ProcessIncomingMessages(parameters *CallbackParams) ([]byte, error) {
 
 	// 0. Generate the params to execute all the Plugin's OnReceive functions
 	pluginParams := api.PluginParams{
@@ -33,7 +33,7 @@ func ProcessIncomingMessages(parameters *api.PipelineCallbackParams) ([]byte, er
 }
 
 // ProcessOutgoingMessages implements the pipeline to process all outgoing responses from the server
-func ProcessOutgoingMessages(parameters *api.PipelineCallbackParams) ([]byte, error) {
+func ProcessOutgoingMessages(parameters *CallbackParams) ([]byte, error) {
 
 	// 0. Generate the params to execute all the Plugin's OnReceive functions
 	pluginParams := api.PluginParams{
