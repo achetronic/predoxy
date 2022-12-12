@@ -24,14 +24,16 @@ const (
 	BigCacheLifeWindowMinutes    = 10
 
 	// Error messages
-	FailedLoadingPluginErrorMessage      = "Error loading a plugin: %s"
-	PluginNotFoundErrorMessage           = "Plugin not found: %s"
-	FailedReadingConnectionErrorMessage  = "Error reading from connection socket: %q"
-	FailedWritingConnectionErrorMessage  = "Error writing to the connection socket: %q"
-	FailedProcessingPipelineErrorMessage = "Error parsing the message: %q"
+	FailedLoadingPluginErrorMessage = "Error loading a plugin: %s"
+	PluginNotFoundErrorMessage      = "Plugin not found: %s"
 
+	FailedReadingConnectionErrorMessage     = "Error reading from connection socket: %q"
+	FailedWritingConnectionErrorMessage     = "Error writing to the connection socket: %q"
+	FailedCreatingBackendConnErrorMessage   = "Error creating backend connection: %q"
 	FailedConnectionDataParsingErrorMessage = "Error parsing the host and port from remote: %q"
 	FailedClosingConnectionErrorMessage     = "Error closing the connection on socket: %q"
+
+	FailedProcessingPipelineErrorMessage = "Error parsing the message: %q"
 
 	// Info messages
 	ClientConnectedInfoMessage = "A new connection established from remote: %s"
@@ -169,13 +171,13 @@ func (p *TCPProxy) forwardPackets(
 	sourceConn net.Conn,
 	destConn net.Conn,
 	sourceConnClosed chan struct{},
-	callback api.PipelineCallback) {
+	callback pipeline.Callback) {
 
 	var message []byte
 	var err error
 
 	// Create params structure to pass to the callback
-	callbackParameters := api.PipelineCallbackParams{
+	callbackParameters := pipeline.CallbackParams{
 		ProxyCache:       p.Cache,
 		SourceConnection: &sourceConn,
 		DestConnection:   &destConn,
@@ -224,8 +226,7 @@ func (p *TCPProxy) handleRequest(frontendConn *net.TCPConn) {
 	// Generate a connection to a backend server for each incoming request
 	backendConn, err := p.createBackendConnection(&p.Config.Backend)
 	if err != nil {
-		// TODO decide how to handle this error because they are inside a goroutine
-		println("Error getting remote connection: ", err.Error())
+		p.Logger.Errorf(FailedCreatingBackendConnErrorMessage, err)
 		return
 	}
 
@@ -299,7 +300,6 @@ func (p *TCPProxy) Launch() (err error) {
 	}
 
 	// Set the timeouts for the connections
-	// TODO: decide the deadline policy
 	frontendServer.SetDeadline(time.Now().Add(ConnectionTimeoutSeconds * time.Second))
 
 	// Close the listener when the application closes

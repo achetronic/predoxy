@@ -36,9 +36,7 @@ type Proxy struct {
 
 // Config represents the configuration manifest to set parameters for all the listeners
 type Config struct {
-	ApiVersion string `yaml:"apiVersion,omitempty"`
-	Kind       string `yaml:"kind,omitempty"`
-	Metadata   struct {
+	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Spec Proxy `yaml:"spec"`

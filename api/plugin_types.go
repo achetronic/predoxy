@@ -1,5 +1,8 @@
 package api
 
+// Plugins are a core feature for this proxy. Due to that, they are defined in the
+// 'api' package, which is the package intended for important base definitions
+
 import (
 	"github.com/allegro/bigcache/v3"
 	"net"
